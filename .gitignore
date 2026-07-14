@@ -5,6 +5,8 @@ dist/
 .vscode
 .DS_Store
 .dev/
+config/
+Dockerfile
 
 # UI build output; embedded via the `embed_ui` build tag (internal/server/embed.go)
 internal/server/ui_dist/*

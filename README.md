@@ -222,6 +222,7 @@ Almost all configuration settings are optional and can be added one step at a ti
   - `useModelName` to override model names sent to upstream servers
   - `${PORT}` automatic port variables for dynamic port assignment
   - `filters` rewrite parts of requests before sending to the upstream server
+  - `routing.scheduler.settings.fifo.recentPoolSize` to keep the N most recently used models loaded instead of unloading them on every swap, dropping only the least recently used one once the pool is full
 
 See the [configuration documentation](docs/configuration.md) for all options.
 

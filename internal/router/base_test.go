@@ -189,6 +189,107 @@ func TestBaseRouter_OnDemandStart(t *testing.T) {
 	}
 }
 
+// swapAllPlanner evicts every other running model, the way groupSwapper treats
+// the members of a `swap: true` group. It is what the recent-model pool has to
+// hold back for models to stay loaded.
+type swapAllPlanner struct{}
+
+func (swapAllPlanner) EvictionFor(target string, running []string) []string {
+	var evict []string
+	for _, id := range running {
+		if id != target {
+			evict = append(evict, id)
+		}
+	}
+	return evict
+}
+func (swapAllPlanner) OnSwapStart(string, []string) {}
+
+// newRecentPoolBase builds a router over models a, b and c with the FIFO
+// recent-model pool sized to poolSize.
+func newRecentPoolBase(t *testing.T, poolSize int, planner scheduler.Swapper) (*baseRouter, map[string]*fakeProcess) {
+	t.Helper()
+
+	procs := map[string]*fakeProcess{}
+	models := map[string]process.Process{}
+	for _, id := range []string{"a", "b", "c"} {
+		p := newFakeProcess(id)
+		p.autoReady = true
+		procs[id] = p
+		models[id] = p
+	}
+
+	conf := config.Config{HealthCheckTimeout: 5}
+	conf.Routing.Scheduler.Settings.Fifo.RecentPoolSize = poolSize
+	return newTestBaseWithConfig(t, conf, models, planner), procs
+}
+
+func serveModel(t *testing.T, b *baseRouter, model string) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, newRequest(model))
+	if w.Code != http.StatusOK {
+		t.Fatalf("serving %s: status=%d body=%q", model, w.Code, w.Body.String())
+	}
+}
+
+func TestBaseRouter_RecentPoolKeepsMostRecentModels(t *testing.T) {
+	b, procs := newRecentPoolBase(t, 2, swapAllPlanner{})
+
+	// The swapper wants a gone when b loads, but both fit the pool, so a stays.
+	serveModel(t, b, "a")
+	serveModel(t, b, "b")
+	if got := procs["a"].stopCalls.Load(); got != 0 {
+		t.Fatalf("a stopCalls=%d want 0 while it still fits the pool", got)
+	}
+	if procs["a"].State() != process.StateReady {
+		t.Fatalf("a state=%q want ready, the pool should hold it loaded", procs["a"].State())
+	}
+
+	// c is one model too many: a, the least recently used, is the one to go.
+	serveModel(t, b, "c")
+	if got := procs["a"].stopCalls.Load(); got != 1 {
+		t.Fatalf("a stopCalls=%d want 1 after being pushed out of the pool", got)
+	}
+	if got := procs["b"].stopCalls.Load(); got != 0 {
+		t.Fatalf("b stopCalls=%d want 0, it is still one of the 2 most recent", got)
+	}
+	if procs["b"].State() != process.StateReady {
+		t.Fatalf("b state=%q want ready, it should stay loaded", procs["b"].State())
+	}
+}
+
+// A model the swapper never evicts — a persistent group member, another GPU's
+// model — must stay loaded no matter what the pool holds. The pool may only
+// hold evictions back, never add them.
+func TestBaseRouter_RecentPoolNeverEvictsBeyondSwapper(t *testing.T) {
+	b, procs := newRecentPoolBase(t, 2, &stubPlanner{})
+
+	serveModel(t, b, "a")
+	serveModel(t, b, "b")
+	serveModel(t, b, "c")
+
+	for _, id := range []string{"a", "b", "c"} {
+		if got := procs[id].stopCalls.Load(); got != 0 {
+			t.Fatalf("%s stopCalls=%d want 0, the swapper asked for no eviction", id, got)
+		}
+	}
+}
+
+func TestBaseRouter_RecentPoolDisabledLeavesSwapperAlone(t *testing.T) {
+	b, procs := newRecentPoolBase(t, 0, swapAllPlanner{})
+
+	serveModel(t, b, "a")
+	serveModel(t, b, "b")
+
+	if got := procs["a"].stopCalls.Load(); got != 1 {
+		t.Fatalf("a stopCalls=%d want 1, the swapper's eviction must go through", got)
+	}
+	if got := procs["b"].runCalls.Load(); got != 1 {
+		t.Fatalf("b runCalls=%d want 1", got)
+	}
+}
+
 func TestBaseRouter_ContextCancel(t *testing.T) {
 	a := newFakeProcess("a")
 	// autoReady=false so swap parks forever until we mark ready.

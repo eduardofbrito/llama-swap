@@ -177,6 +177,16 @@ type SchedulerSettings struct {
 
 type FifoConfig struct {
 	Priority map[string]int `yaml:"priority"` // model ID -> priority, default 0
+
+	// RecentPoolSize keeps the N most recently used models loaded instead of
+	// unloading them: when the router's swapper asks for a model to be evicted,
+	// the scheduler holds it back while it is among the N most recent, and only
+	// lets the least recently used one go once the pool is full. The pool can
+	// only hold back evictions the swapper asked for — models it keeps resident
+	// anyway (a persistent group) are never affected — so the hardware must have
+	// room for N models at once. 0 or 1 (the default) leaves every eviction
+	// decision to the swapper.
+	RecentPoolSize int `yaml:"recentPoolSize"`
 }
 
 type RouterConfig struct {

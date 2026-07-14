@@ -44,6 +44,11 @@ type FIFO struct {
 	reserved map[string]int
 	inFlight map[string]int
 	queued   []HandlerReq
+
+	// recentPool holds the model IDs served most recently, most-recent first,
+	// capped at cfg.RecentPoolSize. It drives the recent-model pool policy in
+	// poolEviction and is empty when the policy is disabled.
+	recentPool []string
 }
 
 // NewFIFO builds a FIFO scheduler. Per-model concurrency limits are derived
@@ -111,8 +116,7 @@ func (s *FIFO) OnRequest(req HandlerReq) {
 		return
 	}
 
-	running := s.runningSet(req.Model)
-	evict := s.planner.EvictionFor(req.Model, running)
+	running, evict := s.evictionFor(req.Model)
 
 	// (3) Fast path: ready, nothing to evict, and nobody is evicting us.
 	if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
@@ -284,6 +288,8 @@ func (s *FIFO) OnShutdown(err error) {
 // Concurrency-limit rejection happens earlier in admit, before a request can
 // start the loading stream.
 func (s *FIFO) grantHandler(req HandlerReq, modelID string) {
+	s.markModelUsed(modelID)
+
 	if err := shared.SetReqData(req.Ctx, "fifo_priority", strconv.Itoa(s.cfg.Priority[req.Model])); err != nil {
 		s.logger.Debugf("failed to set fifo_priority metadata: %v", err)
 	}
@@ -356,6 +362,79 @@ func (s *FIFO) release(modelID string) {
 	}
 }
 
+// markModelUsed records modelID as the most recently used model, moving it to
+// the front of the pool and dropping whatever fell off the end. Only tracked
+// when the recent-model pool policy is on: with it off the pool stays empty and
+// poolEviction is a no-op.
+func (s *FIFO) markModelUsed(modelID string) {
+	size := s.cfg.RecentPoolSize
+	if size <= 0 {
+		return
+	}
+	for i, id := range s.recentPool {
+		if id == modelID {
+			s.recentPool = append(s.recentPool[:i], s.recentPool[i+1:]...)
+			break
+		}
+	}
+	s.recentPool = append([]string{modelID}, s.recentPool...)
+	if len(s.recentPool) > size {
+		s.recentPool = s.recentPool[:size]
+	}
+}
+
+// evictionFor is the single eviction decision for target: the swapper's own
+// eviction set, minus whatever the recent-model pool holds back. Both OnRequest
+// and drainQueue go through here so a request that waited in the queue is
+// decided exactly like one that never had to.
+func (s *FIFO) evictionFor(target string) (running, evict []string) {
+	running = s.runningSet(target)
+	evict = s.planner.EvictionFor(target, running)
+	return running, s.poolEviction(target, evict)
+}
+
+// poolEviction holds back the swapper: the RecentPoolSize most recently used
+// models stay loaded even when the swapper asked for them to be unloaded, so
+// the pool behaves as an LRU working set — loading a new model pushes out the
+// least recently used one instead of every other model.
+//
+// It only ever removes IDs from evict, never adds any. Models the swapper
+// deliberately keeps resident — a persistent group, a model on another GPU —
+// were never in evict to begin with and stay untouched.
+//
+// Sizing the pool is the operator's call: what it keeps loaded is exactly what
+// the swapper wanted unloaded to free capacity, so the hardware has to have
+// room for RecentPoolSize models at once. 0 disables the pool and leaves every
+// eviction decision to the swapper.
+func (s *FIFO) poolEviction(target string, evict []string) []string {
+	size := s.cfg.RecentPoolSize
+	if size <= 0 || len(evict) == 0 {
+		return evict
+	}
+
+	// target occupies one slot — it is about to serve, and becomes the pool's
+	// most recent entry once granted — leaving size-1 slots for the models
+	// already in the pool.
+	keep := make(map[string]struct{}, size)
+	for _, id := range s.recentPool {
+		if len(keep) >= size-1 {
+			break
+		}
+		if id != target {
+			keep[id] = struct{}{}
+		}
+	}
+
+	kept := make([]string, 0, len(evict))
+	for _, id := range evict {
+		if _, held := keep[id]; held {
+			continue
+		}
+		kept = append(kept, id)
+	}
+	return kept
+}
+
 // limit returns the per-model concurrency cap, defaulting to
 // defaultConcurrencyLimit when the model has no explicit entry.
 func (s *FIFO) limit(modelID string) int {
@@ -418,8 +497,7 @@ func (s *FIFO) drainQueue() {
 			sw.waiters = append(sw.waiters, req)
 			continue
 		}
-		running := s.runningSet(req.Model)
-		evict := s.planner.EvictionFor(req.Model, running)
+		running, evict := s.evictionFor(req.Model)
 		if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
 			s.logger.Debugf("%s: queued request for model %s now served fast-path", s.name, req.Model)
 			s.grantHandler(req, req.Model)
