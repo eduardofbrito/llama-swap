@@ -46,4 +46,10 @@ type Process interface {
 
 	// Logger returns the monitor that captures this process's stdout/stderr.
 	Logger() *logmon.Monitor
+
+	// SetRuntimeEnv sets environment overrides ("KEY=VALUE" entries) applied the
+	// next time the process starts. They take precedence over the model config's
+	// env: the router uses this to place a model on the device its group
+	// assigned it. It does not affect an already-running process.
+	SetRuntimeEnv(env []string)
 }

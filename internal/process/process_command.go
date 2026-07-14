@@ -85,6 +85,11 @@ type ProcessCommand struct {
 
 	lastUse  atomic.Int64 // unix nano timestamp of last ServeHTTP completion
 	inflight atomic.Int64 // current in-flight ServeHTTP calls
+
+	// envOverride holds "KEY=VALUE" entries the router assigns before a start
+	// (the GPU a group placed this model on). Written by SetRuntimeEnv from the
+	// router's run loop, read when the start command is built.
+	envOverride atomic.Pointer[[]string]
 }
 
 var _ Process = (*ProcessCommand)(nil)
@@ -115,6 +120,42 @@ func New(
 }
 
 func (p *ProcessCommand) Logger() *logmon.Monitor { return p.processLogger }
+
+// SetRuntimeEnv implements Process.
+func (p *ProcessCommand) SetRuntimeEnv(env []string) {
+	p.envOverride.Store(&env)
+}
+
+// startEnv is the environment for the next start: the model config's env with
+// any variable the runtime override also sets removed, then the override
+// appended. Dropping the shadowed entries rather than relying on "last wins"
+// keeps the child's environment unambiguous — a model that hardcodes
+// CUDA_VISIBLE_DEVICES sees only the device its group assigned it.
+func (p *ProcessCommand) startEnv() []string {
+	override := p.envOverride.Load()
+	if override == nil || len(*override) == 0 {
+		return p.config.Env
+	}
+
+	overridden := make(map[string]struct{}, len(*override))
+	for _, kv := range *override {
+		overridden[envKey(kv)] = struct{}{}
+	}
+
+	env := make([]string, 0, len(p.config.Env)+len(*override))
+	for _, kv := range p.config.Env {
+		if _, shadowed := overridden[envKey(kv)]; shadowed {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, *override...)
+}
+
+func envKey(kv string) string {
+	key, _, _ := strings.Cut(kv, "=")
+	return key
+}
 
 // run is the single-writer goroutine that owns all mutable lifecycle state
 // (current ProcessState, the running *exec.Cmd, the active reverse-proxy
@@ -417,12 +458,13 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 	cmd := exec.CommandContext(cmdCtx, args[0], args[1:]...)
 	cmd.Stderr = p.processLogger
 	cmd.Stdout = p.processLogger
-	cmd.Env = append(cmd.Environ(), p.config.Env...)
+	env := p.startEnv()
+	cmd.Env = append(cmd.Environ(), env...)
 	cmd.Cancel = func() error { return p.sendStopSignal(cmd) }
 	cmd.WaitDelay = p.waitDelay
 	setProcAttributes(cmd)
 
-	p.proxyLogger.Debugf("<%s> Executing start command: %s, env: %s", p.id, strings.Join(args, " "), strings.Join(p.config.Env, ", "))
+	p.proxyLogger.Debugf("<%s> Executing start command: %s, env: %s", p.id, strings.Join(args, " "), strings.Join(env, ", "))
 
 	cmdDone := make(chan struct{})
 	if err := cmd.Start(); err != nil {

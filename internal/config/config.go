@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -76,6 +77,50 @@ type GroupConfig struct {
 	Exclusive  bool     `yaml:"exclusive"`
 	Persistent bool     `yaml:"persistent"`
 	Members    []string `yaml:"members"`
+
+	// GPUs are the devices this group schedules its members onto. Each member
+	// runs on exactly one device, assigned when it starts, so the group keeps
+	// len(GPUs) members loaded at once: a request for a member that is not
+	// loaded takes a free device, and when every device is busy the least
+	// recently used member is unloaded to free one.
+	//
+	// The assigned device is exported to the process as DeviceEnv, overriding
+	// whatever the model's own env sets for that variable. Empty (the default)
+	// leaves device placement entirely to each model's env.
+	GPUs DeviceList `yaml:"gpus"`
+
+	// DeviceEnv is the environment variable the assigned device is exported as.
+	// Defaults to CUDA_VISIBLE_DEVICES.
+	DeviceEnv string `yaml:"deviceEnv"`
+}
+
+// DefaultDeviceEnv is the environment variable a group exports its assigned
+// device as when GroupConfig.DeviceEnv is not set.
+const DefaultDeviceEnv = "CUDA_VISIBLE_DEVICES"
+
+// DeviceList is a list of device IDs. YAML may write them as integers
+// (`gpus: [0, 1]`) or strings (`gpus: ["0", "GPU-abc..."]`) — CUDA accepts both
+// indices and UUIDs — and both decode to the string form used in the env var.
+type DeviceList []string
+
+func (d *DeviceList) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var raw []any
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	out := make(DeviceList, 0, len(raw))
+	for _, v := range raw {
+		switch value := v.(type) {
+		case string:
+			out = append(out, value)
+		case int:
+			out = append(out, strconv.Itoa(value))
+		default:
+			return fmt.Errorf("gpus: device %v must be a string or an integer, got %T", v, v)
+		}
+	}
+	*d = out
+	return nil
 }
 
 // set default values for GroupConfig
@@ -94,6 +139,15 @@ func (c *GroupConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	*c = GroupConfig(defaults)
 	return nil
+}
+
+// Device returns the environment variable this group exports its assigned
+// device as.
+func (c GroupConfig) Device() string {
+	if c.DeviceEnv != "" {
+		return c.DeviceEnv
+	}
+	return DefaultDeviceEnv
 }
 
 type HooksConfig struct {
@@ -186,7 +240,26 @@ type FifoConfig struct {
 	// anyway (a persistent group) are never affected — so the hardware must have
 	// room for N models at once. 0 or 1 (the default) leaves every eviction
 	// decision to the swapper.
+	//
+	// A group that declares `gpus` sets its own pool size from the number of
+	// devices it has (one member per device), overriding this default for its
+	// members.
 	RecentPoolSize int `yaml:"recentPoolSize"`
+
+	// PoolSize is the resolved per-model pool size, filled in at load time from
+	// the groups' `gpus` lists. Models absent from the map use RecentPoolSize.
+	// Not a YAML field: it is derived, never written by hand.
+	PoolSize map[string]int `yaml:"-"`
+}
+
+// PoolSizeFor returns the recent-model pool size that applies to modelID: its
+// group's device count when the group declares `gpus`, otherwise the global
+// RecentPoolSize.
+func (c FifoConfig) PoolSizeFor(modelID string) int {
+	if n, ok := c.PoolSize[modelID]; ok {
+		return n
+	}
+	return c.RecentPoolSize
 }
 
 type RouterConfig struct {

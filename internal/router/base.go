@@ -37,6 +37,11 @@ type baseRouter struct {
 	logger    *logmon.Monitor
 	schedule  scheduler.Scheduler
 
+	// devices places models on the GPUs their group declared, or is nil when no
+	// group does. Only ever touched from the run loop (via StartSwap), so it
+	// needs no locking of its own.
+	devices *deviceAssigner
+
 	// shutdownCtx governs the request machinery: cancelling it tells grant()
 	// and ServeHTTP to stop granting and reject callers. It is deliberately
 	// separate from procCtx — see procCtx below.
@@ -94,6 +99,7 @@ func newBaseRouter(
 		swapDoneCh:  make(chan scheduler.SwapDone),
 		serveDoneCh: make(chan scheduler.ServeDoneEvent),
 		runDone:     make(chan struct{}),
+		devices:     newDeviceAssigner(conf),
 	}
 	sched, err := scheduler.New(conf, name, logger, planner, b)
 	if err != nil {
@@ -176,8 +182,37 @@ func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
 }
 
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
+//
+// The device is assigned here, on the run loop, rather than inside doSwap:
+// concurrent swaps for two members of the same group would otherwise race for
+// the same free GPU. Deciding it here serializes the choice, and the swap
+// goroutine only starts the process the run loop already placed.
 func (b *baseRouter) StartSwap(modelID string, evict []string) {
+	b.assignDevice(modelID, evict)
 	go b.doSwap(modelID, evict)
+}
+
+// assignDevice places modelID on one of its group's GPUs, if its group declares
+// any, and hands the process the env that pins it there on the next start. The
+// models in evict are about to be stopped by this swap, so the devices they hold
+// count as free.
+func (b *baseRouter) assignDevice(modelID string, evict []string) {
+	if b.devices == nil {
+		return
+	}
+	env, ok := b.devices.assign(modelID, evict, b.ModelState)
+	if !ok {
+		// Not managed by a device group, or — a bug — every device is taken even
+		// after this swap's evictions. The pool size comes from the device count
+		// precisely so the second case cannot happen; say so loudly instead of
+		// starting the model on whatever device its env happens to name.
+		if _, managed := b.devices.modelToGroup[modelID]; managed {
+			b.logger.Warnf("%s: no free device for %s, starting it with its configured env", b.name, modelID)
+		}
+		return
+	}
+	b.logger.Debugf("%s: placing %s on %s", b.name, modelID, env)
+	b.processes[modelID].SetRuntimeEnv([]string{env})
 }
 
 // GrantError implements scheduler.Effects.

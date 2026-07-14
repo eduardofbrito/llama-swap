@@ -378,6 +378,39 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		}
 	}
 
+	if config.Routing.Scheduler.Settings.Fifo.RecentPoolSize < 0 {
+		return Config{}, fmt.Errorf("routing.scheduler.settings.fifo.recentPoolSize must be >= 0")
+	}
+
+	// A group's `gpus` list fixes how many of its members stay loaded: one per
+	// device. Resolve that into the per-model pool size the FIFO scheduler reads,
+	// so it holds back the swapper's eviction until every device is busy.
+	poolSize := make(map[string]int)
+	for groupID, groupConfig := range config.Groups {
+		if len(groupConfig.GPUs) == 0 {
+			continue
+		}
+		if !groupConfig.Swap {
+			return Config{}, fmt.Errorf("group %s: gpus requires swap: true — a group that never swaps has nothing to place on a free device", groupID)
+		}
+		if groupConfig.Persistent {
+			return Config{}, fmt.Errorf("group %s: gpus cannot be used with persistent: true — persistent members are never unloaded, so devices never free up", groupID)
+		}
+		seen := make(map[string]bool, len(groupConfig.GPUs))
+		for _, device := range groupConfig.GPUs {
+			if seen[device] {
+				return Config{}, fmt.Errorf("group %s: duplicate device %q in gpus", groupID, device)
+			}
+			seen[device] = true
+		}
+		for _, member := range groupConfig.Members {
+			poolSize[member] = len(groupConfig.GPUs)
+		}
+	}
+	if len(poolSize) > 0 {
+		config.Routing.Scheduler.Settings.Fifo.PoolSize = poolSize
+	}
+
 	// Clean up hooks preload
 	if len(config.Hooks.OnStartup.Preload) > 0 {
 		var toPreload []string

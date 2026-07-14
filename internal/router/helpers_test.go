@@ -65,6 +65,10 @@ type fakeProcess struct {
 	// "swap mid-request" anti-property.
 	inFlightServe       atomic.Int32
 	stoppedWhileServing atomic.Bool
+
+	// runtimeEnv records the last SetRuntimeEnv call, so device-assignment tests
+	// can read back the GPU the router placed this model on.
+	runtimeEnv atomic.Pointer[[]string]
 }
 
 func newFakeProcess(id string) *fakeProcess {
@@ -77,6 +81,18 @@ func newFakeProcess(id string) *fakeProcess {
 		stopStarted:  make(chan struct{}),
 		serveStarted: make(chan struct{}),
 	}
+}
+
+func (f *fakeProcess) SetRuntimeEnv(env []string) {
+	f.runtimeEnv.Store(&env)
+}
+
+// env returns the runtime env the router assigned, or nil if it assigned none.
+func (f *fakeProcess) env() []string {
+	if e := f.runtimeEnv.Load(); e != nil {
+		return *e
+	}
+	return nil
 }
 
 func (f *fakeProcess) setState(s process.ProcessState) {

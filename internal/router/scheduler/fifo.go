@@ -45,9 +45,8 @@ type FIFO struct {
 	inFlight map[string]int
 	queued   []HandlerReq
 
-	// recentPool holds the model IDs served most recently, most-recent first,
-	// capped at cfg.RecentPoolSize. It drives the recent-model pool policy in
-	// poolEviction and is empty when the policy is disabled.
+	// recentPool is every model that has served, most recently used first. It is
+	// the recency order poolEviction draws its keep set from.
 	recentPool []string
 }
 
@@ -362,15 +361,14 @@ func (s *FIFO) release(modelID string) {
 	}
 }
 
-// markModelUsed records modelID as the most recently used model, moving it to
-// the front of the pool and dropping whatever fell off the end. Only tracked
-// when the recent-model pool policy is on: with it off the pool stays empty and
-// poolEviction is a no-op.
+// markModelUsed moves modelID to the front of the recency list. The list holds
+// every model that has served, most-recent first — it is not truncated to the
+// pool size. Truncating it would let a model that is never a candidate for
+// eviction (a persistent group member answering a request between two swaps)
+// push the pool's own models out of the recency order and destroy their
+// standing; poolEviction picks its keep set out of the eviction candidates
+// instead, so extra entries here are harmless.
 func (s *FIFO) markModelUsed(modelID string) {
-	size := s.cfg.RecentPoolSize
-	if size <= 0 {
-		return
-	}
 	for i, id := range s.recentPool {
 		if id == modelID {
 			s.recentPool = append(s.recentPool[:i], s.recentPool[i+1:]...)
@@ -378,9 +376,6 @@ func (s *FIFO) markModelUsed(modelID string) {
 		}
 	}
 	s.recentPool = append([]string{modelID}, s.recentPool...)
-	if len(s.recentPool) > size {
-		s.recentPool = s.recentPool[:size]
-	}
 }
 
 // evictionFor is the single eviction decision for target: the swapper's own
@@ -393,34 +388,46 @@ func (s *FIFO) evictionFor(target string) (running, evict []string) {
 	return running, s.poolEviction(target, evict)
 }
 
-// poolEviction holds back the swapper: the RecentPoolSize most recently used
-// models stay loaded even when the swapper asked for them to be unloaded, so
-// the pool behaves as an LRU working set — loading a new model pushes out the
-// least recently used one instead of every other model.
+// poolEviction holds back the swapper: the N most recently used models stay
+// loaded even when the swapper asked for them to be unloaded, so the pool
+// behaves as an LRU working set — loading a new model pushes out the least
+// recently used one instead of every other model. N is the pool size that
+// applies to target (a group's device count, or the global default).
 //
-// It only ever removes IDs from evict, never adds any. Models the swapper
-// deliberately keeps resident — a persistent group, a model on another GPU —
-// were never in evict to begin with and stay untouched.
+// The keep set is picked from the eviction candidates, never from the raw
+// recency list. Only a model the swapper wants unloaded can occupy a slot, so a
+// model it keeps resident anyway — a persistent group member, a model on a
+// device this group does not schedule — neither consumes a slot nor gets
+// evicted for lack of one. This function only ever removes IDs from evict.
 //
 // Sizing the pool is the operator's call: what it keeps loaded is exactly what
 // the swapper wanted unloaded to free capacity, so the hardware has to have
-// room for RecentPoolSize models at once. 0 disables the pool and leaves every
-// eviction decision to the swapper.
+// room for N models at once. That is why a group with `gpus` sets N from its
+// device count — one member per device. 0 or 1 leaves every eviction decision
+// to the swapper.
 func (s *FIFO) poolEviction(target string, evict []string) []string {
-	size := s.cfg.RecentPoolSize
-	if size <= 0 || len(evict) == 0 {
+	size := s.cfg.PoolSizeFor(target)
+	if size <= 1 || len(evict) == 0 {
 		return evict
 	}
 
-	// target occupies one slot — it is about to serve, and becomes the pool's
-	// most recent entry once granted — leaving size-1 slots for the models
-	// already in the pool.
-	keep := make(map[string]struct{}, size)
+	candidates := make(map[string]struct{}, len(evict))
+	for _, id := range evict {
+		candidates[id] = struct{}{}
+	}
+
+	// target occupies one slot — it is about to serve, and becomes the most
+	// recently used model once granted — leaving size-1 slots for the
+	// candidates, handed out in recency order.
+	keep := make(map[string]struct{}, size-1)
 	for _, id := range s.recentPool {
 		if len(keep) >= size-1 {
 			break
 		}
-		if id != target {
+		if id == target {
+			continue
+		}
+		if _, isCandidate := candidates[id]; isCandidate {
 			keep[id] = struct{}{}
 		}
 	}
