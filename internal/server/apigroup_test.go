@@ -599,6 +599,29 @@ func TestServer_APIPerformance_Unavailable(t *testing.T) {
 	}
 }
 
+func TestServer_ModelStatus_IncludesDefaultGpu(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	s.cfg = config.Config{Models: map[string]config.ModelConfig{
+		"pinned":   {Env: []string{"CUDA_VISIBLE_DEVICES=3"}},
+		"unpinned": {},
+	}}
+
+	got := s.modelStatus()
+	if len(got) != 2 {
+		t.Fatalf("modelStatus len = %d, want 2: %+v", len(got), got)
+	}
+	byID := make(map[string]apiModel, len(got))
+	for _, m := range got {
+		byID[m.Id] = m
+	}
+	if byID["pinned"].DefaultGpu != "3" {
+		t.Errorf("pinned defaultGpu = %q, want 3", byID["pinned"].DefaultGpu)
+	}
+	if byID["unpinned"].DefaultGpu != "" {
+		t.Errorf("unpinned defaultGpu = %q, want empty", byID["unpinned"].DefaultGpu)
+	}
+}
+
 func TestServer_APIEvents_InitialPayload(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	s.cfg.UI.Activity.SessionID = []string{"X-Trace-ID"}
