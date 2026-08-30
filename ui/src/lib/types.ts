@@ -24,6 +24,9 @@ export interface Model {
   aliases?: string[];
   capabilities?: ModelCapabilities;
   context_length?: number;
+  // GPU configured for the model in config.yaml (its CUDA_VISIBLE_DEVICES),
+  // if any; empty/undefined means the model pins no GPU in its config.
+  defaultGpu?: string;
   // selector-only fields from the v1/models llamaswap metadata
   strategy?: string;
   targets?: string[];

@@ -206,6 +206,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		status := modelStatus(id)
 		internalMetadata := map[string]any{"type": "model"}
+		if gpu := process.DefaultGPU(mc.Env); gpu != "" {
+			internalMetadata["gpu"] = gpu
+		}
 		if len(mc.Aliases) > 0 {
 			internalMetadata["aliases"] = mc.Aliases
 		}

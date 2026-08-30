@@ -57,6 +57,36 @@ func TestServer_HandleListModels(t *testing.T) {
 	}
 }
 
+func TestServer_HandleListModels_DefaultGPUMetadata(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	s.cfg = config.Config{
+		Models: map[string]config.ModelConfig{
+			"pinned": {Env: []string{"CUDA_VISIBLE_DEVICES=1"}},
+			"free":   {},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	var resp struct {
+		Data []modelRecord `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byID := map[string]modelRecord{}
+	for _, m := range resp.Data {
+		byID[m.ID] = m
+	}
+	if gpu, ok := byID["pinned"].Meta["llamaswap"].(map[string]any)["gpu"]; !ok || gpu != "1" {
+		t.Errorf("pinned model gpu metadata = %v, want %q", gpu, "1")
+	}
+	if gpu, ok := byID["free"].Meta["llamaswap"].(map[string]any)["gpu"]; ok {
+		t.Errorf("free model should have no gpu metadata, got %v", gpu)
+	}
+}
+
 func TestServer_HandleListModels_PeerNamespaces(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	s.cfg = config.Config{

@@ -65,7 +65,7 @@ func TestProcessCommand_GPUOverrideSetsChildEnv(t *testing.T) {
 		Proxy:              fmt.Sprintf("http://127.0.0.1:%d", port),
 		CheckEndpoint:      "/health",
 		HealthCheckTimeout: 10,
-		Env:                []string{gpuEnvVar + "=7", "OTHER_VAR=keep"},
+		Env:                []string{GPUEnvVar + "=7", "OTHER_VAR=keep"},
 	})
 	t.Cleanup(func() { p.Stop(testStopTimeout) }) //nolint: errcheck
 
@@ -75,14 +75,14 @@ func TestProcessCommand_GPUOverrideSetsChildEnv(t *testing.T) {
 	body := childEnvBody(t, front.URL)
 	// The test values contain no '=' and no overlap with other env var
 	// names, so whole "KEY=value" substring matching is unambiguous.
-	if n := strings.Count(body, gpuEnvVar+"="); n != 1 {
-		t.Errorf("child env has %d %s entries, want exactly 1", n, gpuEnvVar)
+	if n := strings.Count(body, GPUEnvVar+"="); n != 1 {
+		t.Errorf("child env has %d %s entries, want exactly 1", n, GPUEnvVar)
 	}
-	if !strings.Contains(body, gpuEnvVar+"=2") {
-		t.Errorf("child env missing %s=2 (override must apply)", gpuEnvVar)
+	if !strings.Contains(body, GPUEnvVar+"=2") {
+		t.Errorf("child env missing %s=2 (override must apply)", GPUEnvVar)
 	}
-	if strings.Contains(body, gpuEnvVar+"=7") {
-		t.Errorf("child env still has configured %s=7 (override must replace it)", gpuEnvVar)
+	if strings.Contains(body, GPUEnvVar+"=7") {
+		t.Errorf("child env still has configured %s=7 (override must replace it)", GPUEnvVar)
 	}
 	if !strings.Contains(body, "OTHER_VAR=keep") {
 		t.Errorf("child env missing OTHER_VAR=keep (unrelated config env must survive)")
@@ -101,7 +101,7 @@ func TestProcessCommand_NoGPUOverrideKeepsConfigEnv(t *testing.T) {
 		Proxy:              fmt.Sprintf("http://127.0.0.1:%d", port),
 		CheckEndpoint:      "/health",
 		HealthCheckTimeout: 10,
-		Env:                []string{gpuEnvVar + "=5"},
+		Env:                []string{GPUEnvVar + "=5"},
 	})
 	t.Cleanup(func() { p.Stop(testStopTimeout) }) //nolint: errcheck
 
@@ -109,10 +109,36 @@ func TestProcessCommand_NoGPUOverrideKeepsConfigEnv(t *testing.T) {
 	front := newProxyFront(t, p)
 
 	body := childEnvBody(t, front.URL)
-	if n := strings.Count(body, gpuEnvVar+"="); n != 1 {
-		t.Fatalf("child env has %d %s entries, want exactly 1", n, gpuEnvVar)
+	if n := strings.Count(body, GPUEnvVar+"="); n != 1 {
+		t.Fatalf("child env has %d %s entries, want exactly 1", n, GPUEnvVar)
 	}
-	if !strings.Contains(body, gpuEnvVar+"=5") {
-		t.Errorf("child env missing %s=5 (config value must pass through unchanged)", gpuEnvVar)
+	if !strings.Contains(body, GPUEnvVar+"=5") {
+		t.Errorf("child env missing %s=5 (config value must pass through unchanged)", GPUEnvVar)
+	}
+}
+
+// TestDefaultGPU checks extraction of the model's configured GPU from its env list.
+func TestDefaultGPU(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"none set", []string{"OTHER=1"}, ""},
+		{"empty env", nil, ""},
+		{"simple index", []string{"CUDA_VISIBLE_DEVICES=0", "OTHER=1"}, "0"},
+		{"not last entry", []string{"A=1", "CUDA_VISIBLE_DEVICES=2"}, "2"},
+		{"list value", []string{"CUDA_VISIBLE_DEVICES=0,1,3"}, "0,1,3"},
+		{"surrounding spaces", []string{"CUDA_VISIBLE_DEVICES= 4 "}, "4"},
+		{"similar name ignored", []string{"MY_CUDA_VISIBLE_DEVICES=9", "CUDA_VISIBLE=1"}, ""},
+		{"empty value", []string{"CUDA_VISIBLE_DEVICES="}, ""},
+		{"duplicate uses first", []string{"CUDA_VISIBLE_DEVICES=1", "CUDA_VISIBLE_DEVICES=9"}, "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DefaultGPU(tc.env); got != tc.want {
+				t.Errorf("DefaultGPU(%v) = %q, want %q", tc.env, got, tc.want)
+			}
+		})
 	}
 }

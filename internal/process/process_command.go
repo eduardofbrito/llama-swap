@@ -22,10 +22,10 @@ import (
 
 var ErrStartAborted = fmt.Errorf("aborted")
 
-// gpuEnvVar is the environment variable a GPU override is injected as. CUDA is
+// GPUEnvVar is the environment variable a GPU selection is applied as. CUDA is
 // the overwhelmingly common inference backend here (llama-server, vllm, etc.),
 // so the UI's GPU selection is applied via CUDA_VISIBLE_DEVICES.
-const gpuEnvVar = "CUDA_VISIBLE_DEVICES"
+const GPUEnvVar = "CUDA_VISIBLE_DEVICES"
 
 // healthCheckKey marks requests issued by the health check loop, which polls
 // the upstream through the same reverse proxy. Their failures are the expected
@@ -721,15 +721,27 @@ func (p *ProcessCommand) startEnv(opts Options) []string {
 	override := strings.TrimSpace(opts.GpuOverride)
 	env := make([]string, 0, len(p.config.Env)+1)
 	for _, e := range p.config.Env {
-		if override != "" && strings.HasPrefix(e, gpuEnvVar+"=") {
+		if override != "" && strings.HasPrefix(e, GPUEnvVar+"=") {
 			continue
 		}
 		env = append(env, e)
 	}
 	if override != "" {
-		env = append(env, gpuEnvVar+"="+override)
+		env = append(env, GPUEnvVar+"="+override)
 	}
 	return env
+}
+
+// DefaultGPU returns the model's configured GPU: the value of CUDA_VISIBLE_DEVICES
+// in its env list (already macro/env-expanded at config load time), or "" when the
+// model does not pin a GPU in its config.
+func DefaultGPU(env []string) string {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, GPUEnvVar+"="); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func (p *ProcessCommand) Run(timeout time.Duration) error {

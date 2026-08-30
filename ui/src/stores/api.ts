@@ -280,6 +280,7 @@ interface ModelListRecord {
       strategy?: string;
       targets?: string[];
       spillover?: number;
+      gpu?: string;
     };
   };
 }
@@ -322,6 +323,7 @@ async function loadPlaygroundModels(request: number): Promise<Model[]> {
           playgroundType,
           aliases: [...(aliasesByModel.get(record.id) ?? [])],
           capabilities: record.capabilities,
+          defaultGpu: metadata?.gpu,
           strategy: metadata?.strategy,
           targets: metadata?.targets ?? [],
           spillover: metadata?.spillover,
