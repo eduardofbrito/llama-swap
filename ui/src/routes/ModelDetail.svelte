@@ -4,6 +4,7 @@
   import { statusDotColor } from "../stores/modelLoad";
   import type { Model } from "../lib/types";
   import ModelLoadButton from "../components/ModelLoadButton.svelte";
+  import GpuSelector from "../components/GpuSelector.svelte";
   import * as Card from "$lib/components/ui/card/index.js";
   import { Tabs, TabsList, TabsTrigger, TabsContent } from "$lib/components/ui/tabs/index.js";
   import { ExternalLink } from "@lucide/svelte";
@@ -39,6 +40,7 @@
           <span class="text-muted-foreground text-xs uppercase tracking-wide">{model.state}</span>
           <div class="ml-auto flex items-center gap-2">
             {#if !model.peerID}
+              <GpuSelector {model} size="sm" />
               <a
                 href={modelServerPath(resolvedId)}
                 target="_blank"

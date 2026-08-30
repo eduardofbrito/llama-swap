@@ -65,7 +65,13 @@ type SystemMemory struct {
 }
 
 type Accelerator struct {
-	Index           int               `json:"index"`
+	Index int `json:"index"`
+	// DeviceIndex is the device's own index in its native enumeration (the
+	// nvidia-smi GPU index for NVIDIA). It is the value a caller would use to
+	// select this device (e.g. via CUDA_VISIBLE_DEVICES). It is nil when the
+	// detector did not report one. This is independent of Index, which is a
+	// display position in the sorted accelerator list.
+	DeviceIndex     *int              `json:"device_index,omitempty"`
 	Kind            string            `json:"kind"`
 	RawKind         *string           `json:"raw_kind,omitempty"`
 	Vendor          *string           `json:"vendor"`

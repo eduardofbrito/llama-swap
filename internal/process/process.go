@@ -20,6 +20,18 @@ const (
 	StateShutdown ProcessState = ProcessState("shutdown")
 )
 
+// Options carries optional, per-load parameters for the methods in the
+// ProcessWithOptions interface. An empty Options value behaves exactly like
+// the unparameterized Process methods.
+type Options struct {
+	// GpuOverride, when non-empty, is injected as the CUDA_VISIBLE_DEVICES
+	// environment variable (overriding any set in the model config) for the
+	// process launched by this load. This is how the UI's per-model GPU
+	// selector chooses which GPU a model is loaded onto; when empty the model
+	// uses the GPU configured for it.
+	GpuOverride string
+}
+
 type Process interface {
 	// Run starts the process blocks until the process is terminated.
 	// The timeout parameter controls how long to wait for the process to get
@@ -67,4 +79,22 @@ type Process interface {
 
 	// Logger returns the monitor that captures this process's stdout/stderr.
 	Logger() *logmon.Monitor
+}
+
+// ProcessWithOptions is implemented by processes that accept per-load
+// Options. It is a superset of Process: the base methods keep their existing
+// signatures, so callers that do not need per-load options can keep treating a
+// process as a plain Process. Routers type-assert to this interface at load
+// time so that optional capabilities (like a GPU override) degrade gracefully
+// when a process does not support them.
+type ProcessWithOptions interface {
+	Process
+
+	// RunWithOptions behaves like Run but applies Options to the start.
+	RunWithOptions(timeout time.Duration, opts Options) error
+
+	// EnsureReadyWithOptions behaves like EnsureReady but applies Options to
+	// the start. Options are only consulted when this call actually starts the
+	// process; they are ignored when it merely observes an existing state.
+	EnsureReadyWithOptions(ctx context.Context, timeout time.Duration, opts Options) error
 }

@@ -370,6 +370,68 @@ func (s *Server) handleAPIHardware(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiGpu is one GPU the UI can offer for a model to load onto.
+type apiGpu struct {
+	Index int    `json:"index"`
+	Label string `json:"label"`
+}
+
+// handleAPIGpus lists the GPUs this host exposes for model loading. It is the
+// data source for the UI's per-model GPU selector. Each entry's index is the
+// real device index (the nvidia-smi GPU index for NVIDIA) that a CUDA_VISIBLE_DEVICES
+// override would use. Only accelerators with a known device index are listed;
+// when the host reports none, the endpoint returns an empty list and the UI
+// hides the selector so the model's configured GPU always applies.
+func (s *Server) handleAPIGpus(w http.ResponseWriter, r *http.Request) {
+	gpus := make([]apiGpu, 0)
+	if s.hardware != nil {
+		for _, a := range s.hardware.Accelerators {
+			if a.Kind != "gpu" || a.Model == nil || a.DeviceIndex == nil {
+				continue
+			}
+			vendor := ""
+			if a.Vendor != nil {
+				vendor = *a.Vendor
+			}
+			// Only discrete GPUs that can be selected by index for model
+			// loading (NVIDIA / AMD) are offered. Integrated GPUs and NPU
+			// accelerators are skipped.
+			if !isSelectableGpu(vendor, *a.Model) {
+				continue
+			}
+			idx := *a.DeviceIndex
+			label := fmt.Sprintf("GPU %d", idx)
+			if vendor != "" {
+				label += " " + vendor
+			}
+			if *a.Model != "" {
+				label += " " + *a.Model
+			}
+			gpus = append(gpus, apiGpu{Index: idx, Label: label})
+		}
+	}
+	sort.Slice(gpus, func(i, j int) bool { return gpus[i].Index < gpus[j].Index })
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(gpus)
+}
+
+// isSelectableGpu reports whether a GPU can be chosen as a model's target
+// device. Integrated GPUs and NPU accelerators cannot be selected by index.
+func isSelectableGpu(vendor, model string) bool {
+	switch strings.ToLower(vendor) {
+	case "nvidia", "amd":
+		return true
+	}
+	// Fall back to model-name heuristics when the vendor is not populated.
+	m := strings.ToLower(model)
+	for _, marker := range []string{"geforce", "rtx", "a100", "a200", "a30", "a40", "h100", "h200", "h800", "l4", "l40", "v100", "t4", "quartz", "radeon"} {
+		if strings.Contains(m, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleAPICapture returns the stored request/response capture for a metric ID.
 func (s *Server) handleAPICapture(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))

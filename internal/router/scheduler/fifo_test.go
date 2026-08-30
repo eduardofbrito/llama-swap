@@ -45,6 +45,7 @@ type grantRec struct {
 type startRec struct {
 	model string
 	evict []string
+	gpu   string
 }
 
 type stopRec struct {
@@ -87,8 +88,8 @@ func (f *fakeEffects) RunningModels() map[string]process.ProcessState {
 	return out
 }
 
-func (f *fakeEffects) StartSwap(modelID string, evict []string) {
-	f.starts = append(f.starts, startRec{model: modelID, evict: evict})
+func (f *fakeEffects) StartSwap(modelID string, evict []string, opts process.Options) {
+	f.starts = append(f.starts, startRec{model: modelID, evict: evict, gpu: opts.GpuOverride})
 }
 
 func (f *fakeEffects) GrantError(req HandlerReq, err error) {

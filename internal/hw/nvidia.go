@@ -64,6 +64,7 @@ func detectNvidia(ctx context.Context) ([]detectedAccelerator, error) {
 			identity = strings.TrimSpace(record.uuid)
 		}
 		accelerator := Accelerator{
+			DeviceIndex:  intPtr(record.index),
 			Kind:         "gpu",
 			Vendor:       stringPtr("NVIDIA"),
 			Model:        nonEmptyStringPtr(record.name),

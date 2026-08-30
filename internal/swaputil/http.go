@@ -30,9 +30,12 @@ type ReqContextData struct {
 	ModelID          string
 	Streaming        bool
 	SendLoadingState bool
-	// Metadata is a request-scoped key/value bag that handlers may mutate
-	// while processing. The metrics middleware copies it into ActivityLogEntry.
-	Metadata map[string]string
+	// GpuOverride is an optional, request-scoped GPU override (a
+	// CUDA_VISIBLE_DEVICES value) supplied by the UI's per-model GPU
+	// selector. It is only consumed when the request triggers a model load;
+	// empty means "use the GPU configured for the model".
+	GpuOverride string
+	Metadata    map[string]string
 }
 
 const MaxMultiPartSize = 32 << 20
@@ -498,6 +501,17 @@ func SetContext(ctx context.Context, data ReqContextData) context.Context {
 func ReadContext(ctx context.Context) (ReqContextData, bool) {
 	data, ok := ctx.Value(ReqContextKey).(ReqContextData)
 	return data, ok
+}
+
+// GpuOverrideFromContext returns the request-scoped GPU override (a
+// CUDA_VISIBLE_DEVICES value), or an empty string when the request did not
+// pin one.
+func GpuOverrideFromContext(ctx context.Context) string {
+	data, ok := ReadContext(ctx)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(data.GpuOverride)
 }
 
 // SetReqData attaches a key/value pair to the request context's metadata map.

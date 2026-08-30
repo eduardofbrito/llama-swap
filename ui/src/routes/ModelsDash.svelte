@@ -15,6 +15,7 @@
   import { listCapabilityBadges, capabilityBadgeClass } from "../lib/capabilities";
   import type { Model } from "../lib/types";
   import ModelLoadButton from "../components/ModelLoadButton.svelte";
+  import GpuSelector from "../components/GpuSelector.svelte";
   import Tag from "../components/Tag.svelte";
   import * as Card from "$lib/components/ui/card/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -93,6 +94,7 @@
       <Tag class="px-1.5 text-[0.625rem] uppercase">unlisted</Tag>
     {/if}
     {#if !model.peerID}
+      <GpuSelector {model} />
       <a
         href={modelServerPath(model.id)}
         target="_blank"

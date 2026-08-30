@@ -41,6 +41,11 @@ export interface ProfileState {
   profiles: Profile[];
 }
 
+export interface GpuInfo {
+  index: number;
+  label: string;
+}
+
 export interface TokenMetrics {
   cache_tokens: number;
   draft_tokens: number;

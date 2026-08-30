@@ -1,18 +1,19 @@
 import { writable } from "svelte/store";
 import { loadModel, unloadSingleModel } from "./api";
+import { getGpuForModel } from "./modelGpu";
 import type { Model } from "../lib/types";
 
 export const pendingLoads = writable<Record<string, boolean>>({});
 const loadControllers = new Map<string, AbortController>();
 
-export async function handleLoadModel(id: string): Promise<void> {
+export async function handleLoadModel(id: string, gpu?: number): Promise<void> {
   if (isPending(id)) return;
 
   const controller = new AbortController();
   loadControllers.set(id, controller);
   pendingLoads.update((p) => ({ ...p, [id]: true }));
   try {
-    await loadModel(id, controller.signal);
+    await loadModel(id, controller.signal, gpu !== undefined ? String(gpu) : undefined);
   } catch (e) {
     console.error(e);
   } finally {
@@ -39,7 +40,9 @@ export function onToggleLoad(m: Model): void {
   if (m.state === "stopped" && isPending(m.id)) {
     cancelLoad(m.id);
   } else if (m.state === "stopped") {
-    void handleLoadModel(m.id);
+    // Pass the user's GPU choice (if any) for this model; an undefined value
+    // means "use the GPU configured for the model".
+    void handleLoadModel(m.id, getGpuForModel(m.id));
   } else if (m.state === "ready") {
     void unloadSingleModel(m.id);
   }

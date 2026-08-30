@@ -177,8 +177,8 @@ func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
 }
 
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
-func (b *baseRouter) StartSwap(modelID string, evict []string) {
-	go b.doSwap(modelID, evict)
+func (b *baseRouter) StartSwap(modelID string, evict []string, opts process.Options) {
+	go b.doSwap(modelID, evict, opts)
 }
 
 // GrantError implements scheduler.Effects.
@@ -240,7 +240,7 @@ func (b *baseRouter) trackedServe(modelID string, p process.Process) http.Handle
 	}
 }
 
-func (b *baseRouter) doSwap(modelID string, toStop []string) {
+func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Options) {
 	timeout := b.healthCheckTimeout()
 
 	var wg sync.WaitGroup
@@ -261,8 +261,17 @@ func (b *baseRouter) doSwap(modelID string, toStop []string) {
 	// a TTL unload landing in that window used to leave the swap waiting on a
 	// process nobody was ever going to start (issue #946). EnsureReady makes
 	// the same decision inside the process, where the state is owned.
+	//
+	// The WithOptions variant applies any per-load options (a GPU override);
+	// it falls back to the plain EnsureReady when a process does not implement
+	// optional options, so the behaviour is identical to before in that case.
 	target := b.processes[modelID]
-	err := target.EnsureReady(b.shutdownCtx, timeout)
+	var err error
+	if opt, ok := target.(process.ProcessWithOptions); ok {
+		err = opt.EnsureReadyWithOptions(b.shutdownCtx, timeout, opts)
+	} else {
+		err = target.EnsureReady(b.shutdownCtx, timeout)
+	}
 	if err != nil && b.shutdownCtx.Err() == nil {
 		// Quiet during shutdown: every in-flight swap fails at once there, and
 		// that is expected rather than worth a warning per model.
@@ -490,9 +499,10 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Unbuffered: a successful send on Respond proves the waiter is
 		// alive and consuming. grant() relies on this to avoid handing a
 		// handleFunc to a cancelled waiter and leaking the inFlight count.
-		Admit:      make(chan error, 1),
-		Respond:    make(chan scheduler.HandlerResp),
-		PositionCh: make(chan int, 1),
+		Admit:       make(chan error, 1),
+		Respond:     make(chan scheduler.HandlerResp),
+		PositionCh:  make(chan int, 1),
+		GpuOverride: swaputil.GpuOverrideFromContext(req.Context()),
 	}
 
 	select {

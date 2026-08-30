@@ -73,7 +73,12 @@ type fakeProcess struct {
 	runCalls     atomic.Int32
 	stopCalls    atomic.Int32
 	serveCalls   atomic.Int32
+	optsCalls    atomic.Int32
 	stopTimeouts []time.Duration
+
+	// lastOptsVal records the most recent Options passed to a WithOptions
+	// call; guarded by mu.
+	lastOptsVal process.Options
 
 	// onStop, when non-nil, is invoked at the start of every Stop call.
 	// Tests share one recorder across fakes to observe stop ordering.
@@ -280,6 +285,34 @@ func (f *fakeProcess) WaitReady(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// RunWithOptions implements process.ProcessWithOptions: it records the
+// Options and delegates to Run. The router uses the WithOptions variant
+// when it has per-load options (a GPU override) to apply.
+func (f *fakeProcess) RunWithOptions(timeout time.Duration, opts process.Options) error {
+	f.optsCalls.Add(1)
+	f.mu.Lock()
+	f.lastOptsVal = opts
+	f.mu.Unlock()
+	return f.Run(timeout)
+}
+
+// EnsureReadyWithOptions implements process.ProcessWithOptions: it records
+// the Options and delegates to EnsureReady.
+func (f *fakeProcess) EnsureReadyWithOptions(ctx context.Context, timeout time.Duration, opts process.Options) error {
+	f.optsCalls.Add(1)
+	f.mu.Lock()
+	f.lastOptsVal = opts
+	f.mu.Unlock()
+	return f.EnsureReady(ctx, timeout)
+}
+
+// lastOpts returns the Options most recently passed to a WithOptions call.
+func (f *fakeProcess) lastOpts() process.Options {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastOptsVal
 }
 
 func (f *fakeProcess) Logger() *logmon.Monitor { return logmon.NewWriter(io.Discard) }

@@ -375,7 +375,7 @@ func (s *FIFO) startSwap(initial HandlerReq, evict, running []string) {
 		waiters: []HandlerReq{initial},
 	}
 	s.planner.OnSwapStart(initial.Model, running)
-	s.effects.StartSwap(initial.Model, evict)
+	s.effects.StartSwap(initial.Model, evict, process.Options{GpuOverride: initial.GpuOverride})
 }
 
 // enqueue inserts req into the queue in priority order: it goes just before the

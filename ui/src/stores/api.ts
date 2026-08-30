@@ -15,11 +15,16 @@ import type {
   ProfileState,
   PlaygroundModelType,
   HardwareSnapshot,
+  GpuInfo,
 } from "../lib/types";
 import { appendActivityFilters, type ActivityFilters } from "../lib/activityFilters";
 import { connectionState } from "./theme";
 
 const LOG_LENGTH_LIMIT = 1024 * 100; /* 100KB of log data */
+
+// gpuQueryParam must match the server's gpuQueryParam constant (internal/server).
+// It carries a CUDA_VISIBLE_DEVICES value that selects which GPU a model loads onto.
+const gpuQueryParam = "llama-swap-gpu";
 
 // Stores
 export const models = writable<Model[]>([]);
@@ -53,6 +58,10 @@ export const versionInfo = writable<VersionInfo>({
   commit: "unknown",
   version: "unknown",
 });
+// GPUs selectable as a model's load target. Populated from /api/gpus when
+// connected; empty means the host reports no selectable GPU, so the UI hides
+// the per-model GPU selector and the configured default always applies.
+export const gpus = writable<GpuInfo[]>([]);
 
 let apiEventSource: EventSource | null = null;
 let profileRevision = 0;
@@ -108,9 +117,11 @@ export function enableAPIEvents(enabled: boolean): void {
       profiles.set([]);
       activeProfile.set(null);
       profileRevision++;
+      gpus.set([]);
       retryCount = 0;
       connectionState.set("connected");
       void fetchProfiles().catch((error) => console.error(error));
+      void fetchGpus().catch((error) => console.error(error));
     };
 
     apiEventSource.onmessage = (e: MessageEvent) => {
@@ -427,9 +438,13 @@ export async function cancelInflightRequest(id: string): Promise<void> {
   }
 }
 
-export async function loadModel(model: string, signal?: AbortSignal): Promise<void> {
+export async function loadModel(model: string, signal?: AbortSignal, gpu?: string): Promise<void> {
+  let url = `/upstream/${model}/?_=${Date.now()}`;
+  if (gpu) {
+    url += `&${gpuQueryParam}=${encodeURIComponent(gpu)}`;
+  }
   try {
-    const response = await fetch(`/upstream/${model}/?_=${Date.now()}`, {
+    const response = await fetch(url, {
       method: "GET",
       signal,
     });
@@ -487,6 +502,17 @@ export async function fetchPerformance(after?: string): Promise<PerformanceRespo
     console.error("Failed to fetch performance data:", error);
     return null;
   }
+}
+
+export async function fetchGpus(): Promise<GpuInfo[]> {
+  const response = await fetch("/api/gpus");
+  if (!response.ok) {
+    throw new Error(`Failed to list GPUs: ${response.status}`);
+  }
+  const data = (await response.json()) as GpuInfo[];
+  const list = Array.isArray(data) ? data : [];
+  gpus.set(list);
+  return list;
 }
 
 export async function getHardware(): Promise<HardwareSnapshot> {

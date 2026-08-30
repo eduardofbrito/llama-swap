@@ -22,6 +22,11 @@ import (
 
 var ErrStartAborted = fmt.Errorf("aborted")
 
+// gpuEnvVar is the environment variable a GPU override is injected as. CUDA is
+// the overwhelmingly common inference backend here (llama-server, vllm, etc.),
+// so the UI's GPU selection is applied via CUDA_VISIBLE_DEVICES.
+const gpuEnvVar = "CUDA_VISIBLE_DEVICES"
+
 // healthCheckKey marks requests issued by the health check loop, which polls
 // the upstream through the same reverse proxy. Their failures are the expected
 // shape of a model still booting, so they must not be logged as proxy errors.
@@ -81,9 +86,11 @@ const parentCancelGraceTimeout = time.Second
 // this one request type — and therefore one code path — so there is only ever a
 // single way to start a process. block selects the caller's semantics: Run parks
 // its response until the process terminates, EnsureReady is answered as soon as
-// the process is ready or the start fails.
+// the process is ready or the start fails. opts, when non-zero, is applied to
+// the start (for example a GPU override).
 type startReq struct {
 	timeout time.Duration
+	opts    Options
 	respond chan error
 	block   bool
 }
@@ -311,7 +318,7 @@ func (p *ProcessCommand) run() {
 			startCtx, cancelStart := context.WithCancel(context.Background())
 			resultCh := make(chan startResult, 1)
 			go func() {
-				resultCh <- p.doStart(startCtx, req.timeout)
+				resultCh <- p.doStart(startCtx, req.timeout, req.opts)
 			}()
 
 			// pendingStop holds a Stop request that arrived mid-start, so we
@@ -441,7 +448,7 @@ func (p *ProcessCommand) run() {
 	}
 }
 
-func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout time.Duration) startResult {
+func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout time.Duration, opts Options) startResult {
 	if p.config.Proxy == "" {
 		return startResult{err: fmt.Errorf("upstream proxy missing")}
 	}
@@ -505,12 +512,13 @@ func (p *ProcessCommand) doStart(startCtx context.Context, healthCheckTimeout ti
 	cmd := exec.CommandContext(cmdCtx, args[0], args[1:]...)
 	cmd.Stderr = p.processLogger
 	cmd.Stdout = p.processLogger
-	cmd.Env = append(cmd.Environ(), p.config.Env...)
+	env := p.startEnv(opts)
+	cmd.Env = append(cmd.Environ(), env...)
 	cmd.Cancel = func() error { return p.sendStopSignal(cmd) }
 	cmd.WaitDelay = p.waitDelay
 	setProcAttributes(cmd)
 
-	p.proxyLogger.Debugf("<%s> Executing start command: %s, env: %s", p.id, strings.Join(args, " "), strings.Join(p.config.Env, ", "))
+	p.proxyLogger.Debugf("<%s> Executing start command: %s, env: %s", p.id, strings.Join(args, " "), strings.Join(env, ", "))
 
 	cmdDone := make(chan struct{})
 	if err := cmd.Start(); err != nil {
@@ -705,9 +713,33 @@ func (p *ProcessCommand) ID() string {
 	return p.id
 }
 
+// startEnv returns the environment variables applied to the child process.
+// The model's configured env is used; a request-scoped override (currently a
+// GPU selection from the UI) replaces the variable it sets, so the override
+// always wins and no duplicate entry for that variable survives.
+func (p *ProcessCommand) startEnv(opts Options) []string {
+	override := strings.TrimSpace(opts.GpuOverride)
+	env := make([]string, 0, len(p.config.Env)+1)
+	for _, e := range p.config.Env {
+		if override != "" && strings.HasPrefix(e, gpuEnvVar+"=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	if override != "" {
+		env = append(env, gpuEnvVar+"="+override)
+	}
+	return env
+}
+
 func (p *ProcessCommand) Run(timeout time.Duration) error {
+	return p.RunWithOptions(timeout, Options{})
+}
+
+func (p *ProcessCommand) RunWithOptions(timeout time.Duration, opts Options) error {
 	req := startReq{
 		timeout: timeout,
+		opts:    opts,
 		respond: make(chan error, 1),
 		block:   true,
 	}
@@ -733,8 +765,13 @@ func (p *ProcessCommand) Run(timeout time.Duration) error {
 // not inspect State() first — that read races the run loop and is what caused
 // issue #946.
 func (p *ProcessCommand) EnsureReady(ctx context.Context, timeout time.Duration) error {
+	return p.EnsureReadyWithOptions(ctx, timeout, Options{})
+}
+
+func (p *ProcessCommand) EnsureReadyWithOptions(ctx context.Context, timeout time.Duration, opts Options) error {
 	req := startReq{
 		timeout: timeout,
+		opts:    opts,
 		respond: make(chan error, 1),
 	}
 	select {

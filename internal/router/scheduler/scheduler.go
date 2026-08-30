@@ -80,7 +80,9 @@ type Effects interface {
 	// set it hands the Swapper.
 	RunningModels() map[string]process.ProcessState
 	// StartSwap launches the swap goroutine for modelID, stopping evict first.
-	StartSwap(modelID string, evict []string)
+	// opts carries optional per-load parameters (for example a GPU override)
+	// that are applied when the target process is started.
+	StartSwap(modelID string, evict []string, opts process.Options)
 	// GrantError responds to a caller with an error.
 	GrantError(req HandlerReq, err error)
 	// GrantServe hands a caller the wrapped handler for modelID and reports
@@ -115,6 +117,10 @@ type HandlerReq struct {
 	Admit      chan error
 	Respond    chan HandlerResp
 	PositionCh chan int
+	// GpuOverride is the request's GPU selection (a CUDA_VISIBLE_DEVICES value),
+	// read from the request context by the router. It is applied to the process
+	// start when this request is the one that triggers a swap.
+	GpuOverride string
 }
 
 // HandlerResp is the routing decision returned to a HandlerReq's caller: either

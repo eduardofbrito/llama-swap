@@ -14,6 +14,11 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
+// gpuQueryParam is the query parameter the UI uses to select which GPU a model
+// loads onto (a CUDA_VISIBLE_DEVICES value). It is read by /upstream/... loads;
+// an absent parameter means the model uses its configured GPU.
+const gpuQueryParam = "llama-swap-gpu"
+
 // modelRecord is one entry in the OpenAI-compatible /v1/models listing.
 type modelRecord struct {
 	ID                  string         `json:"id"`
@@ -512,8 +517,16 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	escapedRemaining := swaputil.EscapedPathSuffix(r.URL.EscapedPath(), "/upstream/"+searchName)
 	r.URL.Path = remainingPath
 	r.URL.RawPath = escapedRemaining
-	// Pin the resolved model so the router skips body/query extraction.
-	*r = *r.WithContext(swaputil.SetContext(r.Context(), swaputil.ReqContextData{Model: searchName, ModelID: modelID, Metadata: make(map[string]string)}))
+	// Pin the resolved model so the router skips body/query extraction. The
+	// optional llama-swap-gpu query parameter (a CUDA_VISIBLE_DEVICES value)
+	// lets the UI choose which GPU the model loads onto; when absent the model
+	// uses the GPU configured for it.
+	*r = *r.WithContext(swaputil.SetContext(r.Context(), swaputil.ReqContextData{
+		Model:       searchName,
+		ModelID:     modelID,
+		GpuOverride: r.URL.Query().Get(gpuQueryParam),
+		Metadata:    make(map[string]string),
+	}))
 
 	// If the path matches an upstream.ignorePaths entry and the model is
 	// not already loaded, refuse the request without triggering a swap. The
