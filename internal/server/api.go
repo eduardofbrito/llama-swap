@@ -14,11 +14,6 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
-// gpuQueryParam is the query parameter the UI uses to select which GPU a model
-// loads onto (a CUDA_VISIBLE_DEVICES value). It is read by /upstream/... loads;
-// an absent parameter means the model uses its configured GPU.
-const gpuQueryParam = "llama-swap-gpu"
-
 // modelRecord is one entry in the OpenAI-compatible /v1/models listing.
 type modelRecord struct {
 	ID                  string         `json:"id"`
@@ -527,7 +522,7 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	*r = *r.WithContext(swaputil.SetContext(r.Context(), swaputil.ReqContextData{
 		Model:       searchName,
 		ModelID:     modelID,
-		GpuOverride: r.URL.Query().Get(gpuQueryParam),
+		GpuOverride: r.URL.Query().Get(swaputil.GpuQueryParam),
 		Metadata:    make(map[string]string),
 	}))
 

@@ -38,6 +38,14 @@ type ReqContextData struct {
 	Metadata    map[string]string
 }
 
+// GpuQueryParam is the query parameter a caller uses to select which GPU a
+// model loads onto (a CUDA_VISIBLE_DEVICES value). It is read from the URL
+// query string regardless of HTTP method or body content type, so it applies
+// equally to the /upstream/... loader and to normal OpenAI-compatible
+// requests that trigger an on-demand swap. An absent parameter means the
+// model uses its configured GPU.
+const GpuQueryParam = "llama-swap-gpu"
+
 const MaxMultiPartSize = 32 << 20
 
 var (
@@ -540,16 +548,21 @@ func SetReqData(ctx context.Context, key, value string) error {
 // request body is always restored before returning. An error is returned only
 // for I/O or parse failures, not for missing fields.
 func extractContext(r *http.Request) (ReqContextData, error) {
+	// The URL query string is available regardless of method or body content
+	// type, so the GPU override is read once here and applied to every
+	// branch below — not just the GET/query-param case.
+	gpuOverride := r.URL.Query().Get(GpuQueryParam)
 
 	apiKey := ExtractAPIKey(r)
 
 	if r.Method == http.MethodGet {
 		q := r.URL.Query()
 		return ReqContextData{
-			Model:     q.Get("model"),
-			Streaming: q.Get("stream") == "true",
-			ApiKey:    apiKey,
-			Metadata:  make(map[string]string),
+			Model:       q.Get("model"),
+			Streaming:   q.Get("stream") == "true",
+			ApiKey:      apiKey,
+			GpuOverride: gpuOverride,
+			Metadata:    make(map[string]string),
 		}, nil
 	}
 
@@ -565,10 +578,11 @@ func extractContext(r *http.Request) (ReqContextData, error) {
 
 	if strings.Contains(contentType, "application/json") {
 		return ReqContextData{
-			Model:     gjson.GetBytes(bodyBytes, "model").String(),
-			Streaming: gjson.GetBytes(bodyBytes, "stream").Bool(),
-			ApiKey:    apiKey,
-			Metadata:  make(map[string]string),
+			Model:       gjson.GetBytes(bodyBytes, "model").String(),
+			Streaming:   gjson.GetBytes(bodyBytes, "stream").Bool(),
+			ApiKey:      apiKey,
+			GpuOverride: gpuOverride,
+			Metadata:    make(map[string]string),
 		}, nil
 	}
 
@@ -587,10 +601,11 @@ func extractContext(r *http.Request) (ReqContextData, error) {
 	}
 
 	return ReqContextData{
-		Model:     r.FormValue("model"),
-		Streaming: r.FormValue("stream") == "true",
-		ApiKey:    apiKey,
-		Metadata:  make(map[string]string),
+		Model:       r.FormValue("model"),
+		Streaming:   r.FormValue("stream") == "true",
+		ApiKey:      apiKey,
+		GpuOverride: gpuOverride,
+		Metadata:    make(map[string]string),
 	}, nil
 }
 

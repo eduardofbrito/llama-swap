@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { defaultGpuDisplay } from "./modelGpu";
 
 describe("defaultGpuDisplay", () => {
-  it("shows the configured GPU value", () => {
-    expect(defaultGpuDisplay("0")).toBe("0");
-    expect(defaultGpuDisplay("3")).toBe("3");
+  it("shows the configured GPU value prefixed with 'default'", () => {
+    expect(defaultGpuDisplay("0")).toBe("default 0");
+    expect(defaultGpuDisplay("3")).toBe("default 3");
   });
 
-  it("shows multi-GPU comma lists verbatim", () => {
-    expect(defaultGpuDisplay("0,1,3")).toBe("0,1,3");
+  it("shows multi-GPU comma lists prefixed with 'default'", () => {
+    expect(defaultGpuDisplay("0,1,3")).toBe("default 0,1,3");
   });
 
-  it("trims surrounding whitespace", () => {
-    expect(defaultGpuDisplay(" 4 ")).toBe("4");
+  it("trims surrounding whitespace before formatting", () => {
+    expect(defaultGpuDisplay(" 4 ")).toBe("default 4");
   });
 
   it('falls back to "default" when the model pins no GPU', () => {

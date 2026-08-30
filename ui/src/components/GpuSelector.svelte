@@ -75,7 +75,7 @@
       value={defaultGpu}
       aria-label={`Default GPU for ${model.id}`}
       title="GPU configured for this model in config.yaml"
-      class={cn("w-16 select-text text-xs", size === "sm" && "h-7")}
+      class={cn("w-24 select-text text-xs", size === "sm" && "h-7")}
     />
   </div>
 {/if}

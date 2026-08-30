@@ -26,10 +26,10 @@ export function clearGpuForModel(id: string): void {
 }
 
 // defaultGpuDisplay formats the model's configured GPU for the read-only
-// text box next to the selector: the configured value (index, comma list,
-// or any CUDA_VISIBLE_DEVICES value), or "default" when the model's config
-// does not pin a GPU.
+// text box next to the selector: "default <value>" (index, comma list, or
+// any CUDA_VISIBLE_DEVICES value), or just "default" when the model's
+// config does not pin a GPU.
 export function defaultGpuDisplay(gpu: string | undefined): string {
   const trimmed = (gpu ?? "").trim();
-  return trimmed === "" ? "default" : trimmed;
+  return trimmed === "" ? "default" : `default ${trimmed}`;
 }
