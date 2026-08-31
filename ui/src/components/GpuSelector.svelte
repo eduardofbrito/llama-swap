@@ -58,7 +58,6 @@
         class={`w-fit min-w-[5rem] gap-1 ${h}`}
         title="Load onto GPU (config default: as configured in config.yaml)"
       >
-        <span class="text-muted-foreground shrink-0">GPU</span>
         <span class="truncate">{label}</span>
       </Select.Trigger>
       <Select.Content>
@@ -75,7 +74,7 @@
       value={defaultGpu}
       aria-label={`Default GPU for ${model.id}`}
       title="GPU configured for this model in config.yaml"
-      class={cn("w-24 select-text text-xs", size === "sm" && "h-7")}
+      class={cn("w-28 select-text text-xs", size === "sm" && "h-7")}
     />
   </div>
 {/if}
