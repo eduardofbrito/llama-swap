@@ -27,6 +27,9 @@ export interface Model {
   // GPU configured for the model in config.yaml (its CUDA_VISIBLE_DEVICES),
   // if any; empty/undefined means the model pins no GPU in its config.
   defaultGpu?: string;
+  // GPU the process is currently loaded onto (empty when the model is not
+  // running or its GPU could not be determined).
+  gpu?: string;
   // selector-only fields from the v1/models llamaswap metadata
   strategy?: string;
   targets?: string[];

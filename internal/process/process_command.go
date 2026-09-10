@@ -138,6 +138,12 @@ type ProcessCommand struct {
 
 	lastUse  atomic.Int64 // unix nano timestamp of last ServeHTTP completion
 	inflight atomic.Int64 // current in-flight ServeHTTP calls
+
+	// loadGpu holds the CUDA_VISIBLE_DEVICES value applied to the current
+	// (or most recent) load, so observers can report which GPU a running
+	// model actually sits on. Written only by run(); "" when the process
+	// is stopped.
+	loadGpu atomic.Value
 }
 
 var _ Process = (*ProcessCommand)(nil)
@@ -336,6 +342,7 @@ func (p *ProcessCommand) run() {
 					cmdCancel = res.cancel
 					fn := res.handlerFn
 					p.handler.Store(&fn)
+					p.loadGpu.Store(p.effectiveGPU(req.opts))
 					setState(StateReady)
 					notifyWaiters(nil)
 					if req.block {
@@ -433,6 +440,7 @@ func (p *ProcessCommand) run() {
 			// Stop is a no-op (and not an error) when already Stopped — this
 			// is what makes it idempotent for callers that don't track state.
 			setState(StateStopped)
+			p.loadGpu.Store("")
 			if toreDown {
 				// A process we just killed is not going to become ready, so
 				// release anyone parked on that question rather than leaving
@@ -740,6 +748,26 @@ func DefaultGPU(env []string) string {
 		if v, ok := strings.CutPrefix(e, GPUEnvVar+"="); ok {
 			return strings.TrimSpace(v)
 		}
+	}
+	return ""
+}
+
+// effectiveGPU returns the GPU (a CUDA_VISIBLE_DEVICES value) applied to a
+// load: the request-scoped override when set, otherwise the model's
+// configured GPU.
+func (p *ProcessCommand) effectiveGPU(opts Options) string {
+	if v := strings.TrimSpace(opts.GpuOverride); v != "" {
+		return v
+	}
+	return DefaultGPU(p.config.Env)
+}
+
+// GPU reports the GPU (a CUDA_VISIBLE_DEVICES value) the process is
+// currently loaded onto. It is empty when the process is stopped or its
+// GPU could not be determined.
+func (p *ProcessCommand) GPU() string {
+	if v, ok := p.loadGpu.Load().(string); ok {
+		return v
 	}
 	return ""
 }

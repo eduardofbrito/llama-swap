@@ -41,6 +41,11 @@ type LocalRouter interface {
 	// stopped or shut down, keyed by model ID.
 	RunningModels() map[string]process.ProcessState
 
+	// ProcessGPU returns the GPU (a CUDA_VISIBLE_DEVICES value) the named
+	// model is currently loaded onto, or "" when the model is not known to
+	// this router, is not running, or its GPU could not be determined.
+	ProcessGPU(modelID string) string
+
 	// Unload stops the named models, or every running model when none are
 	// named. It blocks until each targeted process has stopped. A timeout <= 0
 	// gives each process its configured unloadTimeout to stop gracefully:

@@ -30,6 +30,9 @@ type apiModel struct {
 	Capabilities  map[string]any `json:"capabilities,omitempty"`
 	ContextLength int            `json:"context_length,omitempty"`
 	DefaultGpu    string         `json:"defaultGpu,omitempty"`
+	// GPU is the GPU the process is currently loaded onto ("" when the
+	// model is not running or its GPU could not be determined).
+	GPU string `json:"gpu,omitempty"`
 }
 
 type apiProfile struct {
@@ -111,8 +114,12 @@ func (s *Server) modelStatus() []apiModel {
 	for _, id := range ids {
 		mc := s.cfg.Models[id]
 		state := "stopped"
+		gpu := ""
 		if st, ok := running[id]; ok {
 			state = string(st)
+			if s.local != nil {
+				gpu = s.local.ProcessGPU(id)
+			}
 		}
 		_, capsMap, _, ctxLen := renderCapabilities(mc.Capabilities)
 		models = append(models, apiModel{
@@ -125,6 +132,7 @@ func (s *Server) modelStatus() []apiModel {
 			Capabilities:  capsMap,
 			ContextLength: ctxLen,
 			DefaultGpu:    process.DefaultGPU(mc.Env),
+			GPU:           gpu,
 		})
 	}
 

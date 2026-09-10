@@ -14,6 +14,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/cache"
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/hw"
+	"github.com/mostlygeek/llama-swap/internal/process"
 	"github.com/mostlygeek/llama-swap/internal/store"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
@@ -600,7 +601,8 @@ func TestServer_APIPerformance_Unavailable(t *testing.T) {
 }
 
 func TestServer_ModelStatus_IncludesDefaultGpu(t *testing.T) {
-	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	local := newStubRouter(nil, "")
+	s := newTestServer(local, newStubRouter(nil, ""))
 	s.cfg = config.Config{Models: map[string]config.ModelConfig{
 		"pinned":   {Env: []string{"CUDA_VISIBLE_DEVICES=3"}},
 		"unpinned": {},
@@ -619,6 +621,25 @@ func TestServer_ModelStatus_IncludesDefaultGpu(t *testing.T) {
 	}
 	if byID["unpinned"].DefaultGpu != "" {
 		t.Errorf("unpinned defaultGpu = %q, want empty", byID["unpinned"].DefaultGpu)
+	}
+	// No model is running: the effective GPU field must stay empty.
+	if byID["pinned"].GPU != "" {
+		t.Errorf("pinned gpu = %q, want empty when stopped", byID["pinned"].GPU)
+	}
+
+	// A running model reports the GPU its process is actually loaded onto,
+	// including a per-load override that differs from the config default.
+	local.running = map[string]process.ProcessState{"pinned": process.StateReady}
+	local.gpuFor = map[string]string{"pinned": "1"}
+	byID = make(map[string]apiModel)
+	for _, m := range s.modelStatus() {
+		byID[m.Id] = m
+	}
+	if byID["pinned"].GPU != "1" {
+		t.Errorf("running pinned gpu = %q, want 1 (the loaded GPU)", byID["pinned"].GPU)
+	}
+	if byID["pinned"].DefaultGpu != "3" {
+		t.Errorf("running pinned defaultGpu = %q, want 3 (config still reported)", byID["pinned"].DefaultGpu)
 	}
 }
 

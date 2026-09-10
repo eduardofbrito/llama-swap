@@ -384,6 +384,21 @@ func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 	return running
 }
 
+// ProcessGPU reports the GPU a named model is loaded onto. Processes are
+// asked only while running; a stopped process reports "" by construction.
+func (b *baseRouter) ProcessGPU(modelID string) string {
+	p, ok := b.processes[modelID]
+	if !ok {
+		return ""
+	}
+	if gpu, ok := p.(interface{ GPU() string }); ok {
+		if st := p.State(); st != process.StateStopped && st != process.StateShutdown {
+			return gpu.GPU()
+		}
+	}
+	return ""
+}
+
 // Unload stops the named models, or every running model when none are named.
 // It blocks until each targeted process has stopped.
 //

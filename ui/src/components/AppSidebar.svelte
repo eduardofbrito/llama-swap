@@ -1,6 +1,6 @@
 <script lang="ts">
   import { link } from "svelte-spa-router";
-  import { FerrisWheel, Boxes, Activity, ScrollText, Gauge, Cpu, Sun, Moon, Monitor, ChevronRight, Settings } from "@lucide/svelte";
+  import { FerrisWheel, Boxes, Activity, ScrollText, Gauge, Cpu, Sun, Moon, Monitor, ChevronRight, Settings, Gpu } from "@lucide/svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import * as Collapsible from "$lib/components/ui/collapsible/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -169,6 +169,17 @@
                 </Sidebar.MenuSub>
               </Collapsible.Content>
             </Collapsible.Root>
+          </Sidebar.MenuItem>
+
+          <Sidebar.MenuItem>
+            <Sidebar.MenuButton isActive={isActive("/gpus", $currentRoute)} tooltipContent="GPUs">
+              {#snippet child({ props })}
+                <a href="/gpus" use:link {...props}>
+                  <Gpu />
+                  <span>GPUs</span>
+                </a>
+              {/snippet}
+            </Sidebar.MenuButton>
           </Sidebar.MenuItem>
 
           <Sidebar.MenuItem>
