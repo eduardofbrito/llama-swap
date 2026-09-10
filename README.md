@@ -9,6 +9,31 @@ Run multiple generative AI models on your machine and hot-swap between them on d
 
 Built in Go for performance and simplicity, llama-swap has zero dependencies and is incredibly easy to set up. Get started in minutes - just one binary and one configuration file.
 
+> [!NOTE]
+> This is **eduardofbrito's fork** of [mostlygeek/llama-swap](https://github.com/mostlygeek/llama-swap), tracking upstream `main` with additional GPU management and in-UI config editing features (see [Fork features](#fork-features) below).
+
+## Fork features
+
+Features added in this fork on top of upstream `main`:
+
+- ✅ **Per-model GPU selector** - pick which GPU each model loads onto from the Models list, the model detail page, or any API request
+  - The model's configured GPU (`CUDA_VISIBLE_DEVICES` in `env`) is shown read-only next to the selector as `GPU Default <value>`, so the config default is always visible
+  - The override travels as the `llama-swap-gpu` query parameter (a `CUDA_VISIBLE_DEVICES` value) on **every** request path — `/upstream/...` loads and normal OpenAI/Anthropic-compatible requests that trigger an on-demand swap
+- ✅ **GPUs page** (`/gpus` menu item, right below Models)
+  - Lists every GPU the host exposes with the model(s) currently loaded on each
+  - Load/unload controls per GPU for every model defined in the config (a model running on another GPU is swapped over)
+- ✅ **Model config tab** (`Models / <model>`, `Conf` tab)
+  - Shows the model's block from the config file as editable YAML
+  - Saving validates the block, writes it back to the file (other models, comments and unrelated keys are preserved; the full result is validated through the config load pipeline before the file is touched, and the write is atomic) and triggers a hot reload — no restart
+- ✅ **Add model from the UI** - the Models page has an **Add Model** dialog that appends a new `models:` block to the config file (duplicate IDs rejected) and hot-reloads
+- ✅ **Config API** - machine-accessible endpoints behind the API auth chain:
+  - `GET /api/gpus` - list the GPUs available for model loading (real device indexes)
+  - `GET /api/config/model/{model_id}` - one model's block from the config file as YAML
+  - `PUT /api/config/model/{model_id}` - replace one model's block (invalid YAML → 422, file untouched)
+  - `POST /api/config/model` - add a new model block (`{"id": ..., "yaml": ...}`)
+  - `POST /api/config/reload` - hot reload the config without a restart
+  - The four `/api/config/...` endpoints return 501 when the process was started without a single `-config` file (e.g. only `-config-dir`)
+
 ## Features:
 
 - ✅ Easy to deploy and configure: one binary, one configuration file. no external dependencies
@@ -49,6 +74,11 @@ Built in Go for performance and simplicity, llama-swap has zero dependencies and
   - `POST /api/models/unload/:model_id` - unload a specific model
   - `GET /api/profiles` - list configured profiles and the active selection
   - `PUT /api/profiles/active` - activate a profile or select none
+  - `GET /api/gpus` - list the GPUs available for model loading (fork)
+  - `GET /api/config/model/:model_id` - read one model's block from the config file as YAML (fork)
+  - `PUT /api/config/model/:model_id` - replace one model's block in the config file (fork)
+  - `POST /api/config/model` - add a new model block to the config file (fork)
+  - `POST /api/config/reload` - hot reload the config without a restart (fork)
   - `/logs` - remote log monitoring
     - `GET /logs` returns buffered plain text logs.
       - If `Accept: text/html` is sent, `/logs` redirects to `/ui/`.
@@ -85,6 +115,20 @@ Inspect request and responses:
 Manually load and unload models:
 
 <img width="1088" height="659" alt="image" src="https://github.com/user-attachments/assets/b6b850f3-c5b0-4c14-ba90-be2de25b51c7" />
+
+Per-model GPU selector and the configured default (fork):
+
+- In the Models list and on each model's detail page, a GPU selector lets you pin a model to a specific GPU; the model's `config.yaml` GPU default is shown read-only as `GPU Default <value>` next to it
+- Any request can override the GPU with the `llama-swap-gpu` query parameter, e.g. `POST /v1/chat/completions?llama-swap-gpu=2`
+
+GPUs page with per-GPU load/unload (fork):
+
+- A `GPUs` menu item (right below Models) lists every GPU the host exposes, the model(s) currently loaded on each, and load/unload controls for every configured model
+
+Model config tab and Add Model (fork):
+
+- `Models / <model>` has a `Conf` tab with the model's block from the config file as editable YAML; saving validates, writes back and hot-reloads without a restart
+- The Models page has an `Add Model` dialog that appends a new model to the config file
 
 Real time log streaming:
 
@@ -193,7 +237,8 @@ Binaries are available on the [release](https://github.com/mostlygeek/llama-swap
 ### Building from source
 
 1. Building requires Go and Node.js (for UI).
-1. `git clone https://github.com/mostlygeek/llama-swap.git`
+1. `git clone https://github.com/eduardofbrito/llama-swap.git` (fork) or `https://github.com/mostlygeek/llama-swap.git` (upstream)
+1. To build a specific commit reproducibly (as this fork's Dockerfile does), `git checkout <sha>` first
 1. `make clean all`
 1. look in the `build/` subdirectory for the llama-swap binary
 
@@ -233,6 +278,11 @@ Almost all configuration settings are optional and can be added one step at a ti
 See the [configuration guide](docs/kb/guides/configuration/configuration-overview.md) for an overview, and
 the [knowledge base](docs/kb/) for focused guides on the features people ask about
 most.
+
+You can also edit the config from the web UI (fork): the `Conf` tab of each model
+(`Models / <model>`) edits that model's block in place, and the `Add Model` dialog on
+the Models page appends new models. Both validate, write back and hot-reload without
+a restart.
 
 You can also just ask. The Playground's **Docs** tab is an agent that calls
 llama-swap's own documentation tools and answers questions about your
