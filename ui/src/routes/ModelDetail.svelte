@@ -11,6 +11,7 @@
   import ModelActivityTab from "../components/model/ModelActivityTab.svelte";
   import ModelLogsTab from "../components/model/ModelLogsTab.svelte";
   import ModelDetailsTab from "../components/model/ModelDetailsTab.svelte";
+  import ModelConfigTab from "../components/model/ModelConfigTab.svelte";
   import { modelServerPath } from "../lib/modelUtils";
 
   let modelId = $derived($params?.id ?? "");
@@ -69,6 +70,9 @@
         <TabsTrigger value="activity">Activity</TabsTrigger>
         <TabsTrigger value="logs">Logs</TabsTrigger>
         <TabsTrigger value="details">Details</TabsTrigger>
+        {#if !model.peerID}
+          <TabsTrigger value="conf">Conf</TabsTrigger>
+        {/if}
       </TabsList>
 
       <!-- Activity -->
@@ -85,6 +89,13 @@
       <TabsContent value="details">
         <ModelDetailsTab model={model} />
       </TabsContent>
+
+      <!-- Conf: raw YAML of this model from the config file, editable -->
+      {#if !model.peerID}
+        <TabsContent value="conf">
+          <ModelConfigTab model={model} />
+        </TabsContent>
+      {/if}
     </Tabs>
   {/if}
 </div>

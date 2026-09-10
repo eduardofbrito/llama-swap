@@ -16,6 +16,7 @@
   import type { Model } from "../lib/types";
   import ModelLoadButton from "../components/ModelLoadButton.svelte";
   import GpuSelector from "../components/GpuSelector.svelte";
+  import AddModelDialog from "../components/AddModelDialog.svelte";
   import Tag from "../components/Tag.svelte";
   import * as Card from "$lib/components/ui/card/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -166,6 +167,7 @@
           {readyCount} ready
         </span>
         <div class="ml-auto flex items-center gap-2">
+          <AddModelDialog />
           <Button
             variant="outline"
             size="sm"

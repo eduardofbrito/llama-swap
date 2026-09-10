@@ -234,6 +234,10 @@ func main() {
 	var reloading bool
 	var reloadMu sync.Mutex
 
+	// wireConfigEdit is assigned once reload exists; the reload closure
+	// calls it for every replacement server it builds.
+	var wireConfigEdit func(srv *server.Server)
+
 	reload := func() {
 		reloadMu.Lock()
 		if reloading {
@@ -295,6 +299,11 @@ func main() {
 
 		applyLogSettings(newCfg)
 
+		// The replacement server must keep the config-editing wiring.
+		if wireConfigEdit != nil {
+			wireConfigEdit(newSrv)
+		}
+
 		if err := old.Shutdown(shutdownTimeout); err != nil {
 			proxyLog.Warnf("error shutting down old server during reload: %v", err)
 		}
@@ -310,6 +319,24 @@ func main() {
 		})
 
 		proxyLog.Info("configuration reloaded")
+	}
+
+	// Wire the config-editing endpoints once the reload closure exists.
+	// Editing requires a single -config file; with only -config-dir the
+	// endpoints stay disabled.
+	editPath := ""
+	if *flagConfig != "" {
+		if abs, err := filepath.Abs(*flagConfig); err == nil {
+			editPath = abs
+		} else {
+			editPath = *flagConfig
+		}
+	}
+	if editPath != "" {
+		wireConfigEdit = func(srv *server.Server) {
+			srv.WithConfigEdit(editPath, reload)
+		}
+		wireConfigEdit(initialSrv)
 	}
 
 	watcherCtx, watcherCancel := context.WithCancel(context.Background())

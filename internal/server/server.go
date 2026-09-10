@@ -59,12 +59,28 @@ type Server struct {
 	local router.LocalRouter
 	peer  router.Router
 
+	// configPath is the -config file this instance was started from. It
+	// enables the config editing endpoints; empty when the config came only
+	// from a -config-dir merge, which disables them.
+	configPath string
+	// reloadFn triggers a hot reload of the config (wired by the caller so
+	// the full reload pipeline runs). nil disables the reload endpoint.
+	reloadFn func()
+
 	mux     *http.ServeMux
 	handler http.Handler
 
 	shutdownCtx  context.Context
 	shutdownFn   context.CancelFunc
 	shuttingDown atomic.Bool
+}
+
+// WithConfigEdit wires the config-file editing endpoints: the -config path
+// ("" disables the endpoints) and the hot-reload callback. Call after New,
+// before serving.
+func (s *Server) WithConfigEdit(configPath string, reloadFn func()) {
+	s.configPath = configPath
+	s.reloadFn = reloadFn
 }
 
 // ActiveProfile returns the active runtime profile, or an empty string when no
@@ -359,6 +375,10 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/hardware", apiChain.ThenFunc(s.handleAPIHardware))
 	mux.Handle("GET /api/gpus", apiChain.ThenFunc(s.handleAPIGpus))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
+	mux.Handle("GET /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIGetModelConfig))
+	mux.Handle("PUT /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIPutModelConfig))
+	mux.Handle("POST /api/config/model", apiChain.ThenFunc(s.handleAPIAddModel))
+	mux.Handle("POST /api/config/reload", apiChain.ThenFunc(s.handleAPIReloadConfig))
 
 	// Stateless MCP server exposing llama-swap's own documentation as tools,
 	// consumed by the Playground's agentic chat and by any external MCP client.
