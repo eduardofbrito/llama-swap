@@ -70,9 +70,29 @@ type Server struct {
 	mux     *http.ServeMux
 	handler http.Handler
 
-	shutdownCtx  context.Context
-	shutdownFn   context.CancelFunc
-	shuttingDown atomic.Bool
+	shutdownCtx    context.Context
+	shutdownFn     context.CancelFunc
+	shuttingDown   atomic.Bool
+	tailcatAddress atomic.Pointer[string]
+}
+
+func (s *Server) SetTailcatAddress(address string) {
+	value := address
+	s.tailcatAddress.Store(&value)
+}
+
+func (s *Server) TailcatAddress() string {
+	if value := s.tailcatAddress.Load(); value != nil {
+		return *value
+	}
+	return ""
+}
+
+type tailcatRequestContextKey struct{}
+
+func isTailcatRequest(ctx context.Context) bool {
+	marked, _ := ctx.Value(tailcatRequestContextKey{}).(bool)
+	return marked
 }
 
 // WithConfigEdit wires the config-file editing endpoints: the -config path
@@ -287,9 +307,7 @@ func stripVersionPrefix(r *http.Request) {
 // before forwarding upstream, so /audioapi/v1/tasks/run reaches the upstream
 // as /v1/tasks/run.
 func stripAudioAPIPrefix(r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/audioapi") {
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/audioapi")
-	}
+	r.URL.Path = strings.TrimPrefix(r.URL.Path, "/audioapi")
 }
 
 // routes builds the mux, registers every route, and wraps the mux with the
@@ -297,8 +315,14 @@ func stripAudioAPIPrefix(r *http.Request) {
 func (s *Server) routes() {
 
 	authMW := CreateAuthMiddleware(s.cfg)
-	modelChain := chain.New(
-		authMW,
+	modelMWs := []chain.Middleware{authMW}
+	// globalConcurrencyLimit guards the top of the inference chain; a limit of
+	// 0 (the default) means no limit, so the handler is left out of the chain
+	// entirely rather than wrapping every request in a no-op semaphore.
+	if s.cfg.GlobalConcurrencyLimit > 0 {
+		modelMWs = append(modelMWs, CreateConcurrencyLimitMiddleware(s.cfg.GlobalConcurrencyLimit))
+	}
+	modelMWs = append(modelMWs,
 		CreateProfileMiddleware(s),
 		CreateSelectorMiddleware(s),
 		CreateRequestContextMiddleware(s.cfg),
@@ -307,6 +331,7 @@ func (s *Server) routes() {
 		CreateFormFilterMiddleware(s.cfg),
 		CreateMetricsMiddleware(s.metrics, s.cfg),
 	)
+	modelChain := chain.New(modelMWs...)
 	// Custom endpoints only need auth.
 	apiChain := chain.New(authMW)
 
@@ -374,6 +399,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/version", apiChain.ThenFunc(s.handleAPIVersion))
 	mux.Handle("GET /api/hardware", apiChain.ThenFunc(s.handleAPIHardware))
 	mux.Handle("GET /api/gpus", apiChain.ThenFunc(s.handleAPIGpus))
+	mux.Handle("GET /api/tailcat", apiChain.ThenFunc(s.handleAPITailcat))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
 	mux.Handle("GET /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIGetModelConfig))
 	mux.Handle("PUT /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIPutModelConfig))
@@ -392,6 +418,92 @@ func (s *Server) routes() {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
+}
+
+// ServeTailcatHTTP applies Tailcat's deliberately narrow HTTP capability
+// surface before delegating to the normal, API-key-protected handler.
+func (s *Server) ServeTailcatHTTP(w http.ResponseWriter, r *http.Request) {
+	tc := s.cfg.Tailcat
+	if !s.cfg.TailcatEnabled() || tc == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	inference := isTailcatInferenceRequest(r)
+	if !tc.Admin {
+		allowed := r.Method == http.MethodGet && (r.URL.Path == "/health" || r.URL.Path == "/v1/models" || r.URL.Path == "/models")
+		if r.Method == http.MethodOptions {
+			allowed = isTailcatInferencePath(r.URL.Path)
+		}
+		if inference {
+			allowed = true
+		}
+		if !allowed {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
+	if inference && r.Method != http.MethodOptions {
+		model, err := swaputil.ExtractModel(r)
+		if err != nil || !tailcatModelAllowed(tc.Models, model) {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	r = r.WithContext(context.WithValue(r.Context(), tailcatRequestContextKey{}, true))
+	s.handler.ServeHTTP(w, r)
+}
+
+func isTailcatInferenceRequest(r *http.Request) bool {
+	if r.Method == http.MethodPost {
+		for _, path := range modelPostJSONRoutes {
+			if r.URL.Path == path {
+				return true
+			}
+		}
+		for _, path := range modelPostFormRoutes {
+			if r.URL.Path == path {
+				return true
+			}
+		}
+	}
+	if r.Method == http.MethodGet {
+		for _, path := range modelGetRoutes {
+			if r.URL.Path == path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isTailcatInferencePath(path string) bool {
+	for _, candidate := range modelPostJSONRoutes {
+		if path == candidate {
+			return true
+		}
+	}
+	for _, candidate := range modelPostFormRoutes {
+		if path == candidate {
+			return true
+		}
+	}
+	for _, candidate := range modelGetRoutes {
+		if path == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func tailcatModelAllowed(models []string, id string) bool {
+	for _, exposed := range models {
+		if exposed == "*" || exposed == id {
+			return true
+		}
+	}
+	return false
 }
 
 // CloseStreams cancels long-lived response streams (Server-Sent Events) so a

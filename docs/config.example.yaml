@@ -116,6 +116,16 @@ globalTTL: 0
 # - large values extend how long an unload can take when a process does not exit cleanly
 unloadTimeout: 10
 
+# globalConcurrencyLimit: caps the number of inference requests served at once
+# across all models combined
+# - optional, default: 0 (no limit)
+# - unlike models.*.concurrencyLimit, this is a single semaphore shared by
+#   every model rather than a per-model limit
+# - requests that exceed the limit receive an HTTP 429 Too Many Requests
+#   response immediately, rather than being queued
+# - see issue #1086
+globalConcurrencyLimit: 0
+
 # macros: a dictionary of string substitutions
 # - optional, default: empty dictionary
 # - macros are reusable snippets
@@ -160,6 +170,23 @@ apiKeys:
   # use environment variable macros to keep secrets out of the config
   - "${env.API_KEY_1}"
   - "${env.API_KEY_2}"
+
+# tailcat: configure models exposed over Tailcat virtual TCP port 80
+# - requires -listen-tailcat /path/to/server.private.json to start the listener
+# - when -listen-tailcat is set, models must contain at least one public ID
+# - empty allow permits any client holding the case-sensitive connection token
+# - "*" exposes every callable public ID
+# - admin defaults false and keeps the UI, /api, logs, metrics and operations private
+# - debug defaults false; set true to include verbose Tailcat transport logs in proxy logs
+# - changing allow or debug requires restarting llama-swap; models and admin update on reload
+tailcat:
+  allow:
+    - nodekey:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  models:
+    - model_a
+    - llama-swap-peer/model_a
+  admin: false
+  debug: false
 
 # upstream: controls behaviour of the /upstream passthrough endpoint
 # - optional, default: empty dictionary
@@ -339,10 +366,14 @@ models:
       # - protected params like "model" cannot be overridden
       # - values can be strings, numbers, booleans, arrays, or objects
       # - always runs for the model
+      # - a key ending in "?" is set-if-undefined: only applied when the
+      #   request does not already contain that parameter
       setParams:
         # Example: enforce specific sampling parameters
         temperature: 0.7
         top_p: 0.9
+        # Example: default max_tokens, requests that set it win
+        max_tokens?: 4096
 
       # setParamsByID: a dictionary of parameters to set based the model ID
       # - optional, default: empty dictionary
@@ -698,6 +729,14 @@ peers:
       - model_a
       - model_b
       - embeddings/model_c
+  # Tailcat peers use the case-sensitive connection token as their proxy.
+  # Virtual TCP port 80 is fixed and must not be included in the URL.
+  tailcat-peer:
+    proxy: tailcat://tcREPLACE_WITH_CONNECTION_TOKEN
+    # Optional. Omit (or use "ephemeral") for a process-lifetime client key.
+    tailcatKey: /path/to/client.private.json
+    models:
+      - model_a
   openrouter:
     proxy: https://openrouter.ai/api
     # apiKey: a string key to be injected into the request

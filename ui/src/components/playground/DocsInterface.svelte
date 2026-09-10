@@ -1,42 +1,46 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { hasListedModels } from "../../stores/api";
+  import { hasListedModels, playgroundModels } from "../../stores/api";
   import { persistentStore } from "../../stores/persistent";
+  import { showGenerationStats } from "../../stores/generationStats";
   import { streamChatCompletion, type ToolDefinition } from "../../lib/chatApi";
+  import { combineGenerationStats, currentStats, markCancelled, startTracking, trackChunk } from "../../lib/generationStats";
   import { runAgent, sanitizeMessages, DEFAULT_MAX_ITERATIONS } from "../../lib/agentLoop";
   import { fetchToolDefinitions, callTool, friendlyToolName } from "../../lib/agentTools";
   import { DOCS_AGENT_SYSTEM_PROMPT } from "../../lib/prompts/docsAgent";
-  import { playgroundStores } from "../../stores/playgroundActivity";
-  import { getTextContent, type ChatMessage } from "../../lib/types";
+  import { pickSuggestions } from "../../lib/prompts/docsSuggestions";
+  import { docsAgentStreaming } from "../../stores/playgroundActivity";
+  import { getTextContent, type ChatMessage, type GenerationStats } from "../../lib/types";
   import { isSubmitEnter } from "../../lib/ime";
   import ChatMessageComponent from "./ChatMessage.svelte";
   import type { WorkItem } from "./AgentWork.svelte";
   import ModelSelector from "./ModelSelector.svelte";
   import ExpandableTextarea from "./ExpandableTextarea.svelte";
   import EmptyState from "../EmptyState.svelte";
-  import { TriangleAlert, X } from "@lucide/svelte";
+  import { RefreshCw, TriangleAlert, X } from "@lucide/svelte";
   import { Button } from "$lib/components/ui/button/index.js";
 
   /**
    * The Docs Agent: a fixed agentic client for llama-swap's own documentation
-   * tools.
+   * tools. This is the whole of the Help page; routes/Help.svelte only frames
+   * it. It sits among the playground components because it is built from them
+   * -- the same chat message, model selector and textarea -- not because Help
+   * is a playground tab. It stopped being one.
    *
-   * Unlike the Chat tab this exposes no settings. The prompt, temperature and
-   * tool set are the thing being shipped -- they are tuned together against
+   * Unlike the Chat tab this exposes no settings. The prompt and tool set are
+   * the thing being shipped -- they are tuned together against
    * evals/docs-agent, and a user who turns one of them down just gets worse
-   * answers with no way to tell why. The only choice left is the model.
+   * answers with no way to tell why. Sampling params are left unset so the
+   * server's own defaults apply. The only choice left is the model.
    */
-  const TEMPERATURE = 0;
-  const MAX_TOKENS = 4096;
-
-  const SUGGESTIONS = [
-    "How do I unload a model after 5 minutes of inactivity?",
-    "How do I run two models on one GPU at the same time?",
-    "What models are configured on this server?",
-    "My model won't load. How do I debug it?",
-  ];
 
   const selectedModelStore = persistentStore<string>("playground-docs-model", "");
+
+  /** Context length for the model selected when an agent iteration begins. */
+  function selectedContextLength(): number | undefined {
+    const id = $selectedModelStore;
+    return $playgroundModels.find((model) => model.id === id || model.aliases?.includes(id))?.context_length;
+  }
 
   function loadMessages(): ChatMessage[] {
     try {
@@ -51,6 +55,9 @@
   }
 
   let messages = $state<ChatMessage[]>(loadMessages());
+  // Drawn once per empty chat rather than derived: a list that recomputed
+  // would reshuffle under the reader's cursor.
+  let suggestions = $state(pickSuggestions());
   let userInput = $state("");
   let isStreaming = $state(false);
   let isReasoning = $state(false);
@@ -63,7 +70,6 @@
 
   let toolDefs = $state<ToolDefinition[]>([]);
   let toolsLoaded = $state(false);
-  let agentIteration = $state(0);
   let agentNotice = $state<string | null>(null);
   let showJinjaHint = $state(false);
 
@@ -73,6 +79,8 @@
         kind: "agent";
         content: string;
         workItems: WorkItem[];
+        stats?: GenerationStats;
+        toolCallCount: number;
         finalAssistantIdx: number;
         userMessageIdx: number | undefined;
         isCurrent: boolean;
@@ -136,6 +144,8 @@
               ? [{
                   kind: "reasoning" as const,
                   content: reasoning,
+                  tokens: message.stats?.reasoning?.tokens,
+                  approxTokens: message.stats?.reasoning?.approxTokens,
                   durationMs: message.reasoningTimeMs,
                   running: isReasoning && messageIdx === messages.length - 1,
                 }]
@@ -152,6 +162,10 @@
             running: message.toolOk === undefined,
           }];
         }),
+        stats: combineGenerationStats(
+          assistantTurns.flatMap(({ message }) => message.stats ? [message.stats] : [])
+        ),
+        toolCallCount: group.filter(({ message }) => message.role === "tool").length,
         finalAssistantIdx,
         userMessageIdx,
         isCurrent: finalAssistantIdx === messages.length - 1,
@@ -161,6 +175,17 @@
     return display;
   });
 
+  /** The first model turn after a user message processed that user's prompt. */
+  function promptStatsFor(idx: number) {
+    if (!$showGenerationStats) return undefined;
+    for (let messageIdx = idx + 1; messageIdx < messages.length; messageIdx++) {
+      const message = messages[messageIdx];
+      if (message.role === "user") return undefined;
+      if (message.role === "assistant") return message.stats;
+    }
+    return undefined;
+  }
+
   onMount(() => {
     fetchToolDefinitions()
       .then((defs) => (toolDefs = defs))
@@ -169,7 +194,7 @@
   });
 
   $effect(() => {
-    playgroundStores.docsStreaming.set(isStreaming);
+    docsAgentStreaming.set(isStreaming);
   });
 
   let wasStreaming = $state(false);
@@ -231,6 +256,10 @@
     void sendMessage();
   }
 
+  function refreshSuggestions() {
+    suggestions = pickSuggestions();
+  }
+
   function cancelStreaming() {
     abortController?.abort();
   }
@@ -240,9 +269,9 @@
       cancelStreaming();
     }
     messages = [];
+    suggestions = pickSuggestions();
     isReasoning = false;
     reasoningStartTime = 0;
-    agentIteration = 0;
     agentNotice = null;
     showJinjaHint = false;
   }
@@ -310,7 +339,6 @@
     isStreaming = true;
     isReasoning = false;
     reasoningStartTime = 0;
-    agentIteration = 0;
     agentNotice = null;
     abortController = new AbortController();
 
@@ -328,13 +356,34 @@
   async function runAgentTurn(signal: AbortSignal) {
     const tools = toolDefs;
     const deps = {
-      streamChat: (msgs: ChatMessage[], sig: AbortSignal) =>
-        streamChatCompletion($selectedModelStore, msgs, sig, {
-          temperature: TEMPERATURE,
-          endpoint: "v1/chat/completions" as const,
-          max_tokens: MAX_TOKENS,
-          tools,
-        }),
+      streamChat: async function* (msgs: ChatMessage[], sig: AbortSignal) {
+        const tracker = startTracking(performance.now(), selectedContextLength());
+        const ticker = window.setInterval(() => {
+          patchLast({ stats: currentStats(tracker, performance.now(), true) });
+        }, 200);
+
+        try {
+          for await (const chunk of streamChatCompletion($selectedModelStore, msgs, sig, {
+            endpoint: "v1/chat/completions" as const,
+            tools,
+            // Keep llama-server's per-chunk timings on for every agent
+            // iteration, including tool-call turns.
+            timingsPerToken: true,
+          })) {
+            const now = performance.now();
+            trackChunk(tracker, chunk, now);
+            patchLast({ stats: currentStats(tracker, now, true) });
+            yield chunk;
+          }
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") markCancelled(tracker);
+          throw error;
+        } finally {
+          window.clearInterval(ticker);
+          if (sig.aborted) markCancelled(tracker);
+          patchLast({ stats: currentStats(tracker, performance.now(), false) });
+        }
+      },
       callTool,
     };
 
@@ -346,7 +395,6 @@
     })) {
       switch (event.type) {
         case "iteration":
-          agentIteration = event.n;
           // The initial placeholder is created before the loop starts. Later
           // iterations start only after all tool results, keeping parallel
           // calls together without empty assistant turns between them.
@@ -369,8 +417,9 @@
           if (event.message.tool_calls?.length) {
             sawToolCall = true;
           } else if (!sawToolCall) {
-            // llama.cpp without --jinja ignores `tools` entirely and answers in
-            // prose, with no error anywhere. Catch the shape of that.
+            // llama.cpp without --jinja (default on recent builds, but not
+            // older ones) ignores `tools` entirely and answers in prose, with
+            // no error anywhere. Catch the shape of that.
             showJinjaHint = looksLikeUnparsedToolCall(getTextContent(event.message.content));
           }
           break;
@@ -460,23 +509,37 @@
     >
       {#if messages.length === 0}
         <EmptyState full>
-          <div class="max-w-md px-4 text-center">
-            <p class="text-foreground text-sm font-medium">Ask about llama-swap</p>
+          <div class="w-full max-w-xl px-4 text-center">
+            <p class="text-foreground text-sm font-medium">Ask llama-swap about llama-swap</p>
             <p class="mt-1 text-sm">
-              Answers come from this server's own documentation and its running configuration, not
-              from what the model remembers.
+              Choose a topic below or ask a question to get started.
             </p>
             <div class="mt-4 flex flex-col gap-2">
-              {#each SUGGESTIONS as suggestion (suggestion)}
+              {#each suggestions as suggestion (suggestion.number)}
                 <button
                   type="button"
-                  class="hover:bg-muted/70 disabled:hover:bg-transparent rounded-md border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50"
+                  class="hover:bg-muted/70 disabled:hover:bg-transparent min-h-14 rounded-md border px-3 py-2 text-left text-sm transition-colors disabled:opacity-50"
                   disabled={!canSend}
-                  onclick={() => ask(suggestion)}
+                  onclick={() => ask(suggestion.question)}
                 >
-                  {suggestion}
+                  <!-- The number is the topic's place in the pool, not this
+                       button's place on screen, so it stays muted: it labels
+                       the question rather than competing with it. -->
+                  <span class="text-muted-foreground tabular-nums">#{suggestion.number}.</span>
+                  {suggestion.question}
                 </button>
               {/each}
+            </div>
+            <div class="mt-2 flex justify-end">
+              <Button
+                variant="ghost"
+                size="sm"
+                class="text-muted-foreground"
+                onclick={refreshSuggestions}
+              >
+                <RefreshCw />
+                Refresh topics
+              </Button>
             </div>
             {#if !$selectedModelStore}
               <p class="mt-3 text-xs">Select a model to get started.</p>
@@ -492,6 +555,9 @@
               workItems={item.workItems}
               isStreaming={isStreaming && item.isCurrent}
               isReasoning={isReasoning && item.isCurrent}
+              stats={$showGenerationStats ? item.stats : undefined}
+              statsLive={isStreaming && item.isCurrent && $showGenerationStats}
+              toolCallCount={item.toolCallCount}
               onRegenerate={!isStreaming && item.userMessageIdx !== undefined
                 ? () => regenerateFromIndex(item.userMessageIdx!)
                 : undefined}
@@ -502,6 +568,8 @@
               content={item.message.content}
               reasoning_content={item.message.reasoning_content}
               reasoningTimeMs={item.message.reasoningTimeMs}
+              stats={item.message.role === "user" ? promptStatsFor(item.idx) : undefined}
+              statsLive={item.message.role === "user" && isStreaming && $showGenerationStats}
               onEdit={item.message.role === "user" ? (newContent) => editMessage(item.idx, newContent) : undefined}
             />
           {/if}
@@ -521,9 +589,10 @@
         <div class="mb-2 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
           <TriangleAlert class="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
           <div class="min-w-0 flex-1">
-            The model described a tool call instead of making one. llama-server needs
-            <code class="font-mono">--jinja</code> for tool calling to work. See the
-            <span class="font-mono">tutorials/tool-calling-setup</span> guide — ask about it here.
+            The model described a tool call instead of making one. Recent llama-server
+            builds enable <code class="font-mono">--jinja</code> by default, but older ones
+            need it added explicitly. See the
+            <span class="font-mono">guides/model-runtime/writing-cmd</span> guide — ask about it here.
           </div>
           <Button variant="ghost" size="icon-sm" onclick={() => (showJinjaHint = false)} title="Dismiss">
             <X class="size-3" />
@@ -543,11 +612,6 @@
         <div class="flex flex-col gap-2">
           {#if isStreaming}
             <Button variant="destructive" onclick={cancelStreaming}>Cancel</Button>
-            {#if agentIteration > 1}
-              <span class="text-muted-foreground text-center text-xs tabular-nums">
-                round {agentIteration}/{DEFAULT_MAX_ITERATIONS}
-              </span>
-            {/if}
           {:else}
             <Button onclick={sendMessage} disabled={!userInput.trim() || !canSend}>Send</Button>
           {/if}

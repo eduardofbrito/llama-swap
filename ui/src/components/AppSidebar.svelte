@@ -1,13 +1,13 @@
 <script lang="ts">
   import { link } from "svelte-spa-router";
-  import { FerrisWheel, Boxes, Activity, ScrollText, Gauge, Cpu, Sun, Moon, Monitor, ChevronRight, Settings, Gpu } from "@lucide/svelte";
+  import { FerrisWheel, Boxes, Activity, Cat, ScrollText, Gauge, Cpu, Sun, Moon, Monitor, ChevronRight, Settings, Gpu, CircleQuestionMark } from "@lucide/svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import * as Collapsible from "$lib/components/ui/collapsible/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { toggleTheme, themeMode, appTitle } from "../stores/theme";
   import { currentRoute } from "../stores/route";
-  import { playgroundActivity } from "../stores/playgroundActivity";
-  import { performanceEnabled, models } from "../stores/api";
+  import { playgroundActivity, docsAgentStreaming } from "../stores/playgroundActivity";
+  import { performanceEnabled, models, tailcatStatus } from "../stores/api";
   import { showUnlistedModels } from "../stores/modelDisplay";
   import { modelsMenuOpen } from "../stores/sidebar";
   import type { Model } from "../lib/types";
@@ -104,6 +104,19 @@
               {/snippet}
             </Sidebar.MenuButton>
           </Sidebar.MenuItem>
+
+          {#if $tailcatStatus.enabled}
+            <Sidebar.MenuItem>
+              <Sidebar.MenuButton isActive={isActive("/tailcat", $currentRoute)} tooltipContent="Tailcat">
+                {#snippet child({ props })}
+                  <a href="/tailcat" use:link {...props}>
+                    <Cat />
+                    <span>Tailcat</span>
+                  </a>
+                {/snippet}
+              </Sidebar.MenuButton>
+            </Sidebar.MenuItem>
+          {/if}
 
           <Sidebar.MenuItem>
             <Sidebar.MenuButton isActive={isActive("/playground", $currentRoute)} tooltipContent="Playground">
@@ -222,8 +235,21 @@
   </Sidebar.Content>
 
   <Sidebar.Footer>
+    <Sidebar.Menu>
+      <Sidebar.MenuItem>
+        <Sidebar.MenuButton isActive={isActive("/help", $currentRoute)} tooltipContent="Help">
+          {#snippet child({ props })}
+            <a href="/help" use:link {...props}>
+              <CircleQuestionMark />
+              <span class={$docsAgentStreaming ? "activity-link" : ""}>Help</span>
+            </a>
+          {/snippet}
+        </Sidebar.MenuButton>
+      </Sidebar.MenuItem>
+    </Sidebar.Menu>
+
     <div
-      class="flex items-center justify-between gap-2 px-1 group-data-[collapsible=icon]:flex-col-reverse"
+      class="flex items-center justify-between gap-2 group-data-[collapsible=icon]:flex-col-reverse"
     >
       <Sidebar.MenuButton
         isActive={isActive("/settings", $currentRoute)}

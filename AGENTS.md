@@ -23,10 +23,21 @@ Only use these technologies:
 - Use `make test-ui` after any changes in ui/
 - Use `make test-all` for commiting changes
 - Use the ./build subdirectory for testing binary builds
-- Use `make eval-docs-agent` to score the Playground's Docs Agent against a
-  local model after changing its system prompt, `docs/kb/` content, the MCP
-  tool descriptions, or the docs search ranking. See
-  `evals/docs-agent/README.md` for the tuning loop.
+- Only when the user asks use `make eval-docs-agent` to score the
+  Help page's Docs Agent against a local model after changing its system prompt, `docs/kb/` content, the MCP tool descriptions, or the docs search ranking. See `evals/docs-agent/README.md` for the tuning loop.
+
+## Documentation
+
+- When a change adds, removes, or changes the meaning of a configuration
+  option, add or update a knowledge base guide under `docs/kb/guides/` for
+  it, not just `docs/config.example.yaml` and `config-schema.json`.
+- Prefer extending an existing guide covering the same topic over creating a
+  new file for a single setting.
+- Follow the frontmatter contract and writing guidelines in `docs/kb/README.md`
+  (required `title`/`summary`/`category`, `config_keys` referencing real
+  schema keys, keep it short, show a working config, say what goes wrong).
+- Run `make test-dev` afterward; `TestKB_FrontmatterIsValid` in
+  `internal/docagent` checks the frontmatter and that `config_keys` resolve.
 
 ### git commit rules
 

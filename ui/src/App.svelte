@@ -5,7 +5,7 @@
   import { wrap } from "svelte-spa-router/wrap";
   import AppSidebar from "./components/AppSidebar.svelte";
   import RouteLoadingImpl from "./components/RouteLoading.svelte";
-  import PlaygroundStub from "./routes/PlaygroundStub.svelte";
+  import AlwaysMountedStub from "./routes/AlwaysMountedStub.svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import * as Tooltip from "$lib/components/ui/tooltip/index.js";
   import { Separator } from "$lib/components/ui/separator/index.js";
@@ -32,7 +32,8 @@
   // placeholder instead of a blank/white flash.
   const routes = {
     "/": wrap({ asyncComponent: () => import("./routes/Activity.svelte"), loadingComponent: RouteLoading }),
-    "/playground": PlaygroundStub,
+    "/playground": AlwaysMountedStub,
+    "/help": AlwaysMountedStub,
     "/models": wrap({ asyncComponent: () => import("./routes/ModelsDash.svelte"), loadingComponent: RouteLoading }),
     "/models/:id": wrap({ asyncComponent: () => import("./routes/ModelDetail.svelte"), loadingComponent: RouteLoading }),
     "/gpus": wrap({ asyncComponent: () => import("./routes/Gpus.svelte"), loadingComponent: RouteLoading }),
@@ -41,12 +42,14 @@
     "/settings": wrap({ asyncComponent: () => import("./routes/Settings.svelte"), loadingComponent: RouteLoading }),
     "/performance": wrap({ asyncComponent: () => import("./routes/Performance.svelte"), loadingComponent: RouteLoading }),
     "/hardware": wrap({ asyncComponent: () => import("./routes/Hardware.svelte"), loadingComponent: RouteLoading }),
+    "/tailcat": wrap({ asyncComponent: () => import("./routes/Tailcat.svelte"), loadingComponent: RouteLoading }),
     "*": wrap({ asyncComponent: () => import("./routes/Activity.svelte"), loadingComponent: RouteLoading }),
   };
 
   const routeTitles: Record<string, string> = {
     "/": "Activity",
     "/playground": "Playground",
+    "/help": "Help",
     "/models": "Models",
     "/gpus": "GPUs",
     "/activity": "Activity",
@@ -54,6 +57,7 @@
     "/settings": "Settings",
     "/performance": "Performance",
     "/hardware": "Hardware",
+    "/tailcat": "Tailcat",
   };
 
   let sectionTitle = $derived.by(() => {
@@ -108,11 +112,13 @@
     document.title = `${icon} ${$appTitle}`;
   });
 
-  // Playground is always mounted (rather than routed) so it keeps its state
-  // when the user navigates away, but it's still lazy-loaded on app start so
-  // its dependencies (chat markdown/KaTeX/highlight.js rendering) don't block
-  // the initial page load.
+  // Playground and Help are always mounted (rather than routed) so they keep
+  // their state when the user navigates away -- a chat that is still streaming
+  // survives a look at the logs. Both are still lazy-loaded on app start so
+  // their dependencies (chat markdown/KaTeX/highlight.js rendering) don't
+  // block the initial page load.
   let PlaygroundComponent = $state<Component | null>(null);
+  let HelpComponent = $state<Component | null>(null);
 
   onMount(() => {
     const cleanupScreenWidth = initScreenWidth();
@@ -121,6 +127,9 @@
     checkPerformanceEnabled();
     import("./routes/Playground.svelte").then((m) => {
       PlaygroundComponent = m.default;
+    });
+    import("./routes/Help.svelte").then((m) => {
+      HelpComponent = m.default;
     });
 
     return () => {
@@ -175,7 +184,14 @@
             <RouteLoading />
           {/if}
         </div>
-        <div class="h-full" class:hidden={$currentRoute === "/playground"}>
+        <div class="h-full" class:hidden={$currentRoute !== "/help"}>
+          {#if HelpComponent}
+            <HelpComponent />
+          {:else}
+            <RouteLoading />
+          {/if}
+        </div>
+        <div class="h-full" class:hidden={$currentRoute === "/playground" || $currentRoute === "/help"}>
           <Router {routes} on:routeLoaded={handleRouteLoaded} />
         </div>
       </main>
