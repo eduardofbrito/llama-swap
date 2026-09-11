@@ -57,6 +57,7 @@ type stopRec struct {
 // and GrantServe outcomes, then assert on the recorded calls.
 type fakeEffects struct {
 	states       map[string]process.ProcessState // model -> state; missing => not handled
+	manual       map[string]bool                 // model -> manualOnly (default false)
 	serveResult  map[string]bool                 // GrantServe return per model (default true)
 	lastServeReq HandlerReq
 
@@ -68,6 +69,7 @@ type fakeEffects struct {
 func newFakeEffects() *fakeEffects {
 	return &fakeEffects{
 		states:      map[string]process.ProcessState{},
+		manual:      map[string]bool{},
 		serveResult: map[string]bool{},
 	}
 }
@@ -75,6 +77,14 @@ func newFakeEffects() *fakeEffects {
 func (f *fakeEffects) ModelState(modelID string) (process.ProcessState, bool) {
 	st, ok := f.states[modelID]
 	return st, ok
+}
+
+func (f *fakeEffects) ModelManual(modelID string) (bool, bool) {
+	if f.manual == nil {
+		return false, false
+	}
+	m, ok := f.manual[modelID]
+	return m, ok
 }
 
 func (f *fakeEffects) RunningModels() map[string]process.ProcessState {
@@ -945,5 +955,171 @@ func TestFIFO_ConcurrencyLimit_CancelledQueuedWaiterReleasesReservation(t *testi
 
 	if got := len(s.queued); got != 1 {
 		t.Fatalf("queue len=%d want 1 after cancel and retry", got)
+	}
+}
+
+// newFIFOManual builds a FIFO whose model a is manualOnly and started in the
+// given state, with the planner forcing an eviction so a non-fast-path request
+// would normally queue or start a swap.
+func newFIFOManual(t *testing.T, state process.ProcessState) (*FIFO, *fakeEffects) {
+	t.Helper()
+	eff := newFakeEffects()
+	eff.states["a"] = state
+	eff.states["b"] = process.StateReady
+	eff.manual["a"] = true
+	models := map[string]config.ModelConfig{"a": {ManualOnly: true}, "b": {}}
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{evict: map[string][]string{"a": {"b"}}}, config.FifoConfig{}, models, eff)
+	return s, eff
+}
+
+// TestFIFO_ManualOnly_NotLoadedRejectsWith503 verifies that an inference
+// request for an unloaded manual-only model is rejected at admission with a
+// 503, starts no swap, and leaks no concurrency reservation (a follow-up load
+// probe can still start the model).
+func TestFIFO_ManualOnly_NotLoadedRejectsWith503(t *testing.T) {
+	s, eff := newFIFOManual(t, process.StateStopped)
+
+	r := req("a")
+	s.OnRequest(r)
+
+	var httpErr swaputil.HTTPError
+	err := admitErr(t, r)
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("admission err=%v want HTTPError", err)
+	}
+	if httpErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode()=%d want 503", httpErr.StatusCode())
+	}
+	if got := eff.startsFor("a"); got != 0 {
+		t.Errorf("StartSwap(a)=%d want 0", got)
+	}
+	if got := eff.served("a"); got != 0 {
+		t.Errorf("served(a)=%d want 0", got)
+	}
+
+	// No reservation leak: a load probe for the same model can still start.
+	probe := req("a")
+	probe.LoadRequest = true
+	s.OnRequest(probe)
+	assertAdmitted(t, probe)
+	if got := eff.startsFor("a"); got != 1 {
+		t.Errorf("StartSwap(a)=%d want 1 (load probe honored)", got)
+	}
+}
+
+// TestFIFO_ManualOnly_ReadyServes verifies that an inference request for a
+// ready manual-only model is served normally (the operator loaded it, so it
+// works).
+func TestFIFO_ManualOnly_ReadyServes(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["a"] = process.StateReady
+	eff.manual["a"] = true
+	models := map[string]config.ModelConfig{"a": {ManualOnly: true}}
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{}, config.FifoConfig{}, models, eff)
+
+	r := req("a")
+	s.OnRequest(r)
+	assertAdmitted(t, r)
+	if got := eff.served("a"); got != 1 {
+		t.Errorf("served(a)=%d want 1", got)
+	}
+	if got := eff.startsFor("a"); got != 0 {
+		t.Errorf("StartSwap(a)=%d want 0", got)
+	}
+}
+
+// TestFIFO_ManualOnly_InferenceDoesNotJoinInFlightSwap verifies that while a
+// manual-only model is loading (e.g. an operator pressed the load button), a
+// concurrent inference request is rejected instead of waiting on the load.
+func TestFIFO_ManualOnly_InferenceDoesNotJoinInFlightSwap(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["a"] = process.StateStarting
+	eff.manual["a"] = true
+	models := map[string]config.ModelConfig{"a": {ManualOnly: true}}
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{}, config.FifoConfig{}, models, eff)
+
+	// An in-flight swap to a (as if the load button fired).
+	probe := reqCh("a")
+	probe.LoadRequest = true
+	s.OnRequest(probe)
+	assertAdmitted(t, probe)
+	if got := eff.startsFor("a"); got != 1 {
+		t.Fatalf("StartSwap(a)=%d want 1", got)
+	}
+
+	infer := req("a")
+	s.OnRequest(infer)
+	var httpErr swaputil.HTTPError
+	if err := admitErr(t, infer); !errors.As(err, &httpErr) || httpErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Fatalf("admission err=%v want 503 HTTPError", err)
+	}
+	if sw, ok := s.active["a"]; !ok || len(sw.waiters) != 1 {
+		t.Errorf("swap waiters=%d want 1 (inference must not join)", len(s.active["a"].waiters))
+	}
+	if len(s.queued) != 0 {
+		t.Errorf("queue len=%d want 0", len(s.queued))
+	}
+}
+
+// TestFIFO_ManualOnly_DrainQueueErrorsStaleRequests verifies that an
+// inference request already in the queue (admitted before manualOnly was
+// enabled by a config reload) is rejected by drainQueue instead of being
+// granted or starting a load.
+func TestFIFO_ManualOnly_DrainQueueErrorsStaleRequests(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["a"] = process.StateStopped
+	eff.states["b"] = process.StateStopped // b's request below starts its swap
+	// b is NOT manual at admission time; a is too. The stale request for a
+	// queues because its swap would evict b, whose own swap is in flight.
+	models := map[string]config.ModelConfig{"a": {ManualOnly: true}, "b": {}}
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{evict: map[string][]string{"a": {"b"}}}, config.FifoConfig{}, models, eff)
+
+	// A swap to b is in flight.
+	bReq := reqCh("b")
+	s.OnRequest(bReq)
+	assertAdmitted(t, bReq)
+	if got := eff.startsFor("b"); got != 1 {
+		t.Fatalf("StartSwap(b)=%d want 1", got)
+	}
+
+	// A request for a arrives while a is not manual: it queues, because its
+	// swap (evicting b) collides with b's in-flight swap.
+	eff.manual["a"] = false
+	r := reqCh("a")
+	s.OnRequest(r)
+	assertAdmitted(t, r)
+	if len(s.queued) != 1 {
+		t.Fatalf("queue len=%d want 1", len(s.queued))
+	}
+
+	// Config reload flips a to manualOnly before the queue drains.
+	eff.manual["a"] = true
+
+	// b's swap completes: drainQueue would now start a's swap, but a is
+	// manual-only and not ready, so the stale request must be rejected.
+	s.OnSwapDone(SwapDone{ModelID: "b"})
+
+	// fakeEffects.GrantError records instead of sending on the Respond
+	// channel, so assert on the recorded error grant.
+	if got := eff.errored("a"); got != 1 {
+		t.Fatalf("errored(a)=%d want 1", got)
+	}
+	var httpErr swaputil.HTTPError
+	found := false
+	for _, g := range eff.grants {
+		if g.model == "a" && g.err != nil && errors.As(g.err, &httpErr) {
+			if httpErr.StatusCode() == http.StatusServiceUnavailable {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no 503 grant recorded for a: %+v", eff.grants)
+	}
+	if got := eff.startsFor("a"); got != 0 {
+		t.Errorf("StartSwap(a)=%d want 0", got)
+	}
+	if len(s.queued) != 0 {
+		t.Errorf("queue len=%d want 0", len(s.queued))
 	}
 }

@@ -94,6 +94,12 @@ type ModelConfig struct {
 	// Limit concurrency of HTTP requests to process
 	ConcurrencyLimit int `yaml:"concurrencyLimit"`
 
+	// ManualOnly disables on-demand loading: a request for this model is
+	// answered immediately with a 503 instead of starting (or queuing) a
+	// load, so upstream clients (e.g. LiteLLM) fail fast and fall back.
+	// Requests served while the model is already loaded still succeed.
+	ManualOnly bool `yaml:"manualOnly"`
+
 	// Model filters see issue #174
 	Filters ModelFilters `yaml:"filters"`
 

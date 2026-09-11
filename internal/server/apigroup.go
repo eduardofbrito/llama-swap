@@ -33,6 +33,10 @@ type apiModel struct {
 	// GPU is the GPU the process is currently loaded onto ("" when the
 	// model is not running or its GPU could not be determined).
 	GPU string `json:"gpu,omitempty"`
+	// ManualOnly mirrors the model's manualOnly config flag: the model is
+	// never loaded on demand, and inference requests for it get a fast
+	// 503 until an operator loads it.
+	ManualOnly bool `json:"manualOnly,omitempty"`
 }
 
 type apiProfile struct {
@@ -133,6 +137,7 @@ func (s *Server) modelStatus() []apiModel {
 			ContextLength: ctxLen,
 			DefaultGpu:    process.DefaultGPU(mc.Env),
 			GPU:           gpu,
+			ManualOnly:    mc.ManualOnly,
 		})
 	}
 

@@ -19,6 +19,10 @@ Features added in this fork on top of upstream `main`:
 - ✅ **Per-model GPU selector** - pick which GPU each model loads onto from the Models list, the model detail page, or any API request
   - The model's configured GPU (`CUDA_VISIBLE_DEVICES` in `env`) is shown read-only next to the selector as `GPU Default <value>`, so the config default is always visible
   - The override travels as the `llama-swap-gpu` query parameter (a `CUDA_VISIBLE_DEVICES` value) on **every** request path — `/upstream/...` loads and normal OpenAI/Anthropic-compatible requests that trigger an on-demand swap
+- ✅ **Manual-only models** (`manualOnly: true` per model) - a model that must never be loaded on demand
+  - An inference request (POST) for an unloaded manual-only model is answered immediately with a `503` (`manual_load_required`) instead of starting — or queueing — a load, so upstream clients like LiteLLM fail over to their fallback right away
+  - A manual model that **is** loaded still serves normally, and it can be started on purpose: the dashboard's load buttons (a GET against the model endpoint) are honored
+  - The Models list shows a `manual` badge on such models; combine with a `persistent` group to keep it resident
 - ✅ **GPUs page** (`/gpus` menu item, right below Models)
   - Lists every GPU the host exposes with the model(s) currently loaded on each
   - Load/unload controls per GPU for every model defined in the config (a model running on another GPU is swapped over)

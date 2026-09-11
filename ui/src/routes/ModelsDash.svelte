@@ -94,6 +94,9 @@
     {#if model.unlisted}
       <Tag class="px-1.5 text-[0.625rem] uppercase">unlisted</Tag>
     {/if}
+    {#if model.manualOnly}
+      <Tag class="px-1.5 text-[0.625rem] uppercase">manual</Tag>
+    {/if}
     {#if !model.peerID}
       <GpuSelector {model} />
       <a

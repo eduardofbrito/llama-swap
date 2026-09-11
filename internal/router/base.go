@@ -176,6 +176,12 @@ func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
 	return p.State(), true
 }
 
+// ModelManual implements scheduler.Effects.
+func (b *baseRouter) ModelManual(modelID string) (bool, bool) {
+	mc, ok := b.config.Models[modelID]
+	return ok && mc.ManualOnly, ok
+}
+
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
 func (b *baseRouter) StartSwap(modelID string, evict []string, opts process.Options) {
 	go b.doSwap(modelID, evict, opts)
@@ -514,7 +520,13 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Unbuffered: a successful send on Respond proves the waiter is
 		// alive and consuming. grant() relies on this to avoid handing a
 		// handleFunc to a cancelled waiter and leaking the inFlight count.
-		Admit:       make(chan error, 1),
+		Admit: make(chan error, 1),
+		// A GET against the model endpoint is a load/keepalive probe (the
+		// dashboard's load buttons use exactly this shape), not inference.
+		// Manual-only models honor these so the operator can still start
+		// the model, while POST inference calls are rejected until it is
+		// loaded.
+		LoadRequest: req.Method == http.MethodGet,
 		Respond:     make(chan scheduler.HandlerResp),
 		PositionCh:  make(chan int, 1),
 		GpuOverride: swaputil.GpuOverrideFromContext(req.Context()),

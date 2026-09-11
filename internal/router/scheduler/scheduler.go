@@ -75,6 +75,11 @@ type Effects interface {
 	// ModelState returns the current state of a model's process. ok is false
 	// when the model is not handled by this router.
 	ModelState(modelID string) (process.ProcessState, bool)
+	// ModelManual reports whether a model has manualOnly set in config.
+	// The scheduler uses it to reject on-demand loads with an immediate
+	// error instead of starting (or queuing) a swap. ok is false when the
+	// model is not handled by this router.
+	ModelManual(modelID string) (bool, bool)
 	// RunningModels returns the state of every process that is not stopped or
 	// shut down, keyed by model ID. The scheduler uses it to build the running
 	// set it hands the Swapper.
@@ -121,6 +126,12 @@ type HandlerReq struct {
 	// read from the request context by the router. It is applied to the process
 	// start when this request is the one that triggers a swap.
 	GpuOverride string
+	// LoadRequest is true when the caller is issuing a load/keepalive probe
+	// (a GET against the model's upstream endpoint) rather than an inference
+	// call. Manual-only models honor these probes — the dashboard's load
+	// buttons use exactly this shape — while rejecting inference requests
+	// that would trigger an on-demand load.
+	LoadRequest bool
 }
 
 // HandlerResp is the routing decision returned to a HandlerReq's caller: either

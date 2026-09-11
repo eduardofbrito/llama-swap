@@ -100,6 +100,20 @@ func (s *FIFO) OnRequest(req HandlerReq) {
 		return
 	}
 
+	// Manual-only models: an inference request for a model that is not
+	// ready is rejected immediately with a 503 so upstream clients (e.g.
+	// LiteLLM) fail over to their fallback instead of waiting on a load.
+	// Placed before admit() on purpose: a rejected request must not hold
+	// a concurrency reservation. Load probes (GET — the dashboard's load
+	// buttons use exactly this shape) fall through so the operator can
+	// still start the model; a ready manual model also falls through and
+	// gets the fast path below.
+	if manual, _ := s.effects.ModelManual(req.Model); manual && !req.LoadRequest && state != process.StateReady {
+		s.logger.Debugf("%s: rejecting request for manual-only model %s (not loaded)", s.name, req.Model)
+		s.rejectAdmission(req, swaputil.ManualLoadError{ModelID: req.Model})
+		return
+	}
+
 	if !s.admit(req) {
 		return
 	}
@@ -411,6 +425,14 @@ func (s *FIFO) drainQueue() {
 		state, ok := s.effects.ModelState(req.Model)
 		if !ok {
 			s.grantError(req, ErrModelNotFound)
+			continue
+		}
+		// Same rule as OnRequest (2a): a manual-only model that is not
+		// ready does not serve inference requests. Keeps a config reload
+		// that enables manualOnly from letting queued requests trigger
+		// (or join) a load.
+		if manual, _ := s.effects.ModelManual(req.Model); manual && !req.LoadRequest && state != process.StateReady {
+			s.grantError(req, swaputil.ManualLoadError{ModelID: req.Model})
 			continue
 		}
 		if sw, ok := s.active[req.Model]; ok {

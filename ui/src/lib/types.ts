@@ -30,6 +30,9 @@ export interface Model {
   // GPU the process is currently loaded onto (empty when the model is not
   // running or its GPU could not be determined).
   gpu?: string;
+  // Model is manual-only: never loaded on demand; inference requests get a
+  // fast 503 until an operator loads it from the dashboard.
+  manualOnly?: boolean;
   // selector-only fields from the v1/models llamaswap metadata
   strategy?: string;
   targets?: string[];

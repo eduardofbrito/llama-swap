@@ -348,6 +348,53 @@ func TestBaseRouter_OnDemandStart(t *testing.T) {
 	}
 }
 
+// TestBaseRouter_ManualOnly_InferenceRejectedLoadProbeStarts drives the full
+// router over HTTP: a POST inference request for an unloaded manual-only
+// model gets a fast 503 without starting the process, a GET load probe
+// (the dashboard's load-button shape) starts it, and a ready model serves
+// inference normally.
+func TestBaseRouter_ManualOnly_InferenceRejectedLoadProbeStarts(t *testing.T) {
+	a := newFakeProcess("a")
+	a.autoReady = true
+	conf := config.Config{
+		HealthCheckTimeout: 5,
+		Models: map[string]config.ModelConfig{
+			"a": {ManualOnly: true},
+		},
+	}
+	b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
+
+	// Inference (POST) for the unloaded manual model: fast 503, no load.
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, newRequest("a"))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST status=%d want 503 body=%q", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "manual_load_required") {
+		t.Errorf("body missing manual_load_required code: %q", w.Body.String())
+	}
+	if got := a.runCalls.Load(); got != 0 {
+		t.Errorf("runCalls=%d want 0 (inference must not load a manual model)", got)
+	}
+
+	// Load probe (GET, the dashboard's load-button shape): honored, starts.
+	gw := httptest.NewRecorder()
+	b.ServeHTTP(gw, httptest.NewRequest(http.MethodGet, "/props?model=a", nil))
+
+	if got := a.runCalls.Load(); got != 1 {
+		t.Fatalf("runCalls=%d want 1 (load probe must start the model)", got)
+	}
+
+	// Once ready, inference is served normally.
+	w2 := httptest.NewRecorder()
+	b.ServeHTTP(w2, newRequest("a"))
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("ready POST status=%d want 200 body=%q", w2.Code, w2.Body.String())
+	}
+}
+
 func TestBaseRouter_IgnoreWebsocketsRejectsModelUnlessReady(t *testing.T) {
 	for _, state := range []process.ProcessState{process.StateStopped, process.StateStarting} {
 		t.Run(string(state), func(t *testing.T) {

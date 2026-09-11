@@ -2,6 +2,7 @@ package swaputil
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 )
@@ -149,4 +150,34 @@ func (e ConcurrencyLimitError) message() string {
 		return e.Message
 	}
 	return "Too many requests"
+}
+
+// ManualLoadError is an HTTPError for a 503 rejection of an on-demand load of
+// a manualOnly model. The model is never started (or queued) for such
+// requests: clients like LiteLLM want the fast 503 so they can fail over to
+// their fallback immediately. Loading a manual model on purpose is an explicit
+// operator action (the UI load button marks the request with the
+// llama-swap-load query parameter) and is not rejected.
+type ManualLoadError struct {
+	ModelID string
+}
+
+func (e ManualLoadError) Error() string {
+	return fmt.Sprintf("manual load required for model %s", e.ModelID)
+}
+
+func (e ManualLoadError) StatusCode() int { return http.StatusServiceUnavailable }
+
+func (e ManualLoadError) Header() http.Header {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return h
+}
+
+func (e ManualLoadError) Body() []byte {
+	return NewErrorEnvelope(
+		e.StatusCode(),
+		fmt.Sprintf("model %s is manual-only and is not loaded; start it from the dashboard", e.ModelID),
+		"manual_load_required",
+	).JSON()
 }
