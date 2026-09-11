@@ -2,13 +2,21 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
+
+// isReadOnlyErr reports whether err comes from a read-only filesystem or a
+// read-only mount (the case when the config file is bind-mounted :ro).
+func isReadOnlyErr(err error) bool {
+	return errors.Is(err, syscall.EROFS)
+}
 
 // editMu serializes edits to the config file so concurrent UI saves cannot
 // interleave read-modify-write cycles.
@@ -46,13 +54,43 @@ func ConfigFileEdit(path string, fn func(doc *yaml.Node) error) error {
 
 	tmp := fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		if isReadOnlyErr(err) {
+			return fmt.Errorf("config file is mounted read-only; remount it writable (drop :ro in the volume) to edit from the UI: %w", err)
+		}
 		return fmt.Errorf("writing config file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		// Renaming over a bind mount (e.g. Docker -v file:/app/config.yaml)
+		// fails with EBUSY: a mount point cannot be replaced by rename.
+		// Fall back to an in-place write: truncate + write into the same
+		// inode, which is the only way to update a bind-mounted file. Not
+		// atomic, but the content already passed full validation above.
+		inErr := writeInPlace(path, out)
 		os.Remove(tmp)
-		return fmt.Errorf("replacing config file: %w", err)
+		if inErr == nil {
+			return nil
+		}
+		if isReadOnlyErr(inErr) {
+			return fmt.Errorf("config file is mounted read-only; remount it writable (drop :ro in the volume) to edit from the UI: %w", inErr)
+		}
+		return fmt.Errorf("replacing config file: %w (in-place write also failed: %v)", err, inErr)
 	}
 	return nil
+}
+
+// writeInPlace rewrites the existing file in place (same inode): truncate +
+// write. The only way to update a bind-mounted file, where rename over the
+// mount point is impossible (EBUSY).
+func writeInPlace(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // ModelYAMLText returns the YAML text of one model's block as written in the
