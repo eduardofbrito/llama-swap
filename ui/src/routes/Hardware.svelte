@@ -53,7 +53,7 @@
 
   function acceleratorSummary(accelerator: HardwareAccelerator): string[] {
     return [
-      `Accelerator ${accelerator.index + 1} (index ${accelerator.index}): ${acceleratorTitle(accelerator)}`,
+      `GPU ${accelerator.index + 1} (index ${accelerator.index}): ${acceleratorTitle(accelerator)}`,
       `  Type: ${titleCase(accelerator.kind)}`,
       `  GPU Index: ${accelerator.index}`,
       `  Vendor: ${shown(accelerator.vendor)}`,
@@ -66,7 +66,7 @@
 
   function hardwareSummary(snapshot: HardwareSnapshot): string {
     const acceleratorLines = snapshot.accelerators.length === 0
-      ? ["No accelerators were detected or exposed to this process."]
+      ? ["No GPUs were detected or exposed to this process."]
       : snapshot.accelerators.flatMap((accelerator, index) => [
           ...(index > 0 ? [""] : []),
           ...acceleratorSummary(accelerator),
@@ -89,7 +89,7 @@
       `  Physical Cores: ${shown(snapshot.cpu.physical_core_count)}`,
       `  Logical Threads: ${shown(snapshot.cpu.logical_thread_count)}`,
       "",
-      `Accelerators (${snapshot.accelerators.length})`,
+      `GPUs (${snapshot.accelerators.length})`,
       ...acceleratorLines,
     ].join("\n");
   }
@@ -156,11 +156,11 @@
 
         <section class="mt-4 rounded-lg border p-4">
           <div class="mb-3 flex items-baseline justify-between gap-4">
-            <h4 class="text-sm font-semibold text-muted-foreground">Accelerators</h4>
+            <h4 class="text-sm font-semibold text-muted-foreground">GPUs</h4>
             <span class="text-xs text-muted-foreground">{hardware.accelerators.length} detected</span>
           </div>
           {#if hardware.accelerators.length === 0}
-            <p class="text-sm text-muted-foreground">No accelerators were detected or exposed to this process.</p>
+            <p class="text-sm text-muted-foreground">No GPUs were detected or exposed to this process.</p>
           {:else}
             <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
               {#each hardware.accelerators as accelerator (accelerator.index)}
