@@ -26,7 +26,7 @@ func newTestGroup(t *testing.T, conf config.Config, processes map[string]process
 		config:       conf,
 		modelToGroup: modelToGroup,
 	}
-	base, err := newBaseRouter("group", conf, processes, logmon.NewWriter(io.Discard), swapper)
+	base, err := newBaseRouter("group", conf, processes, logmon.NewWriter(io.Discard), logmon.NewWriter(io.Discard), swapper)
 	if err != nil {
 		t.Fatalf("newBaseRouter: %v", err)
 	}

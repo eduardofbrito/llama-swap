@@ -257,7 +257,12 @@ export interface HardwareMemory {
 }
 
 export interface HardwareAccelerator {
+  // index is this accelerator's display position in the sorted list, NOT a
+  // device address. device_index is the device's own index in its native
+  // enumeration (the nvidia-smi GPU index) and is the value that selects it
+  // via CUDA_VISIBLE_DEVICES; it is absent when the detector did not report one.
   index: number;
+  device_index?: number | null;
   kind: "gpu" | "npu" | "other";
   raw_kind?: string | null;
   vendor: string | null;

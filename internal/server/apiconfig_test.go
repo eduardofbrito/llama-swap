@@ -1,6 +1,7 @@
 package server
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,7 +22,31 @@ func writeTestConfigFile(t *testing.T, content string) string {
 	return p
 }
 
+const apiconfigTestKey = "test-config-key"
+
+// newConfigEditServer builds a server whose config-editing endpoints are fully
+// enabled: an apiKey is configured (the endpoints refuse to run without one)
+// and a -config file path is wired in. It returns the server and the path of
+// the config file on disk.
+func newConfigEditServer(t *testing.T, content string, reloadFn func()) (*Server, string) {
+	t.Helper()
+	cfg := config.Config{RequiredAPIKeys: []string{apiconfigTestKey}}
+	s := newTestServerWithConfig(cfg, newStubRouter(nil, ""), newStubRouter(nil, ""))
+	path := writeTestConfigFile(t, content)
+	s.WithConfigEdit(path, reloadFn)
+	return s, path
+}
+
+// newConfigRequest builds an authenticated request for a config endpoint.
+func newConfigRequest(method, path string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(method, path, body)
+	r.Header.Set("Authorization", "Bearer "+apiconfigTestKey)
+	return r
+}
+
 const apiconfigTestConfig = `healthCheckTimeout: 30
+apiKeys:
+  - ` + apiconfigTestKey + `
 models:
   alpha:
     proxy: http://127.0.0.1:11435
@@ -48,11 +73,10 @@ func TestServer_ConfigEndpoints_NoConfigFile(t *testing.T) {
 }
 
 func TestServer_ConfigEndpoints_GetModel(t *testing.T) {
-	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.WithConfigEdit(writeTestConfigFile(t, apiconfigTestConfig), nil)
+	s, _ := newConfigEditServer(t, apiconfigTestConfig, nil)
 
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/config/model/alpha", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodGet, "/api/config/model/alpha", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -62,20 +86,18 @@ func TestServer_ConfigEndpoints_GetModel(t *testing.T) {
 
 	// Unknown model -> 404.
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/config/model/ghost", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodGet, "/api/config/model/ghost", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("ghost status = %d, want 404", w.Code)
 	}
 }
 
 func TestServer_ConfigEndpoints_PutModel(t *testing.T) {
-	path := writeTestConfigFile(t, apiconfigTestConfig)
-	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.WithConfigEdit(path, nil)
+	s, path := newConfigEditServer(t, apiconfigTestConfig, nil)
 
 	body := `{"yaml":"proxy: http://127.0.0.1:22435\nname: Alpha2\n"}`
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(body)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -90,7 +112,7 @@ func TestServer_ConfigEndpoints_PutModel(t *testing.T) {
 	// Invalid YAML -> 422 and the file must be unchanged.
 	body = `{"yaml":"not: [a list\n"}`
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(body)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(body)))
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("invalid yaml status = %d, want 422", w.Code)
 	}
@@ -101,13 +123,11 @@ func TestServer_ConfigEndpoints_PutModel(t *testing.T) {
 }
 
 func TestServer_ConfigEndpoints_AddModel(t *testing.T) {
-	path := writeTestConfigFile(t, apiconfigTestConfig)
-	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.WithConfigEdit(path, nil)
+	s, path := newConfigEditServer(t, apiconfigTestConfig, nil)
 
 	body := `{"id":"beta","yaml":"proxy: http://127.0.0.1:11436\n"}`
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/model", strings.NewReader(body)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/model", strings.NewReader(body)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -118,12 +138,12 @@ func TestServer_ConfigEndpoints_AddModel(t *testing.T) {
 
 	// Duplicate id -> 422, missing id -> 400.
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/model", strings.NewReader(`{"id":"alpha","yaml":"proxy: http://127.0.0.1:1\n"}`)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/model", strings.NewReader(`{"id":"alpha","yaml":"proxy: http://127.0.0.1:1\n"}`)))
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("duplicate status = %d, want 422", w.Code)
 	}
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/model", strings.NewReader(`{"id":"  ","yaml":"proxy: http://127.0.0.1:1\n"}`)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/model", strings.NewReader(`{"id":"  ","yaml":"proxy: http://127.0.0.1:1\n"}`)))
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("missing id status = %d, want 400", w.Code)
 	}
@@ -146,13 +166,13 @@ func TestServer_ConfigEndpoints_Reload_Surgical(t *testing.T) {
 	// Edit alpha's proxy in the file, exactly as the Conf tab's PUT would.
 	edited := `{"yaml":"proxy: http://127.0.0.1:22435\n"}`
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(edited)))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(edited)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, body = %s", w.Code, w.Body.String())
 	}
 
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("surgical reload status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -193,7 +213,7 @@ func TestServer_ConfigEndpoints_Reload_SurgicalFallback(t *testing.T) {
 	s.WithConfigDir("")
 
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
@@ -221,22 +241,20 @@ func mustRead(t *testing.T, path string) []byte {
 
 func TestServer_ConfigEndpoints_Reload(t *testing.T) {
 	// Reload not wired -> 501.
-	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.WithConfigEdit(writeTestConfigFile(t, apiconfigTestConfig), nil)
+	s, _ := newConfigEditServer(t, apiconfigTestConfig, nil)
 	w := httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/reload", nil))
 	if w.Code != http.StatusNotImplemented {
 		t.Errorf("reload status = %d, want 501", w.Code)
 	}
 
 	// Reload wired -> 200 and the callback fires asynchronously.
 	done := make(chan struct{})
-	s = newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.WithConfigEdit(writeTestConfigFile(t, apiconfigTestConfig), func() {
+	s, _ = newConfigEditServer(t, apiconfigTestConfig, func() {
 		close(done)
 	})
 	w = httptest.NewRecorder()
-	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload", nil))
+	s.ServeHTTP(w, newConfigRequest(http.MethodPost, "/api/config/reload", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("reload status = %d, want 200", w.Code)
 	}
@@ -244,5 +262,63 @@ func TestServer_ConfigEndpoints_Reload(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Error("reload callback was not invoked")
+	}
+}
+
+// TestServer_ConfigEndpoints_RefusedWithoutAPIKeys pins the security gate: a
+// caller that can write a model block chooses that model's `cmd` and can then
+// start it with a plain GET, so the editing endpoints must refuse to operate
+// while the config declares no apiKeys (the auth middleware is a deliberate
+// pass-through in that state).
+func TestServer_ConfigEndpoints_RefusedWithoutAPIKeys(t *testing.T) {
+	// Config file path is wired (the operator passed -enable-config-api) but
+	// the live config has no apiKeys.
+	s := newTestServerWithConfig(config.Config{}, newStubRouter(nil, ""), newStubRouter(nil, ""))
+	path := writeTestConfigFile(t, apiconfigTestConfig)
+	s.WithConfigEdit(path, func() { t.Error("reload must not run without apiKeys") })
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/config/model/alpha", ""},
+		{http.MethodPut, "/api/config/model/alpha", `{"yaml":"proxy: http://127.0.0.1:1\n"}`},
+		{http.MethodPost, "/api/config/model", `{"id":"evil","yaml":"cmd: /bin/sh -c id\nproxy: http://127.0.0.1:1\n"}`},
+		{http.MethodPost, "/api/config/reload", ""},
+	} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s %s status = %d, want 403", tc.method, tc.path, w.Code)
+		}
+	}
+
+	// Nothing may have reached the file.
+	if data := mustRead(t, path); strings.Contains(string(data), "evil") {
+		t.Errorf("a refused request still wrote to the config file: %s", data)
+	}
+}
+
+// TestServer_ConfigEndpoints_Status reports editability to the UI so it can
+// hide controls that could only fail.
+func TestServer_ConfigEndpoints_Status(t *testing.T) {
+	// Editing off (no -enable-config-api): editable=false with a reason.
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/config/status", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status endpoint = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"editable":false`) {
+		t.Errorf("want editable=false, got %s", w.Body.String())
+	}
+
+	// Fully enabled: editable=true.
+	enabled, _ := newConfigEditServer(t, apiconfigTestConfig, nil)
+	w = httptest.NewRecorder()
+	enabled.ServeHTTP(w, newConfigRequest(http.MethodGet, "/api/config/status", nil))
+	if !strings.Contains(w.Body.String(), `"editable":true`) {
+		t.Errorf("want editable=true, got %s", w.Body.String())
 	}
 }

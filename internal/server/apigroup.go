@@ -53,15 +53,16 @@ func nullableProfile(name string) any {
 }
 
 func (s *Server) handleAPIProfiles(w http.ResponseWriter, r *http.Request) {
-	ids := make([]string, 0, len(s.Cfg().Profiles))
-	for id := range s.Cfg().Profiles {
+	cfg := s.Cfg()
+	ids := make([]string, 0, len(cfg.Profiles))
+	for id := range cfg.Profiles {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
 	profiles := make([]apiProfile, 0, len(ids))
 	for _, id := range ids {
-		profile := s.Cfg().Profiles[id]
+		profile := cfg.Profiles[id]
 		profiles = append(profiles, apiProfile{
 			ID:          id,
 			Description: profile.Description,
@@ -106,17 +107,18 @@ func (s *Server) handleAPIActiveProfile(w http.ResponseWriter, r *http.Request) 
 // modelStatus returns every configured model joined with its current process
 // state (defaulting to "stopped"), followed by peer models.
 func (s *Server) modelStatus() []apiModel {
+	cfg := s.Cfg()
 	running := s.local.RunningModels()
 
-	ids := make([]string, 0, len(s.Cfg().Models))
-	for id := range s.Cfg().Models {
+	ids := make([]string, 0, len(cfg.Models))
+	for id := range cfg.Models {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
 	models := make([]apiModel, 0, len(ids))
 	for _, id := range ids {
-		mc := s.Cfg().Models[id]
+		mc := cfg.Models[id]
 		state := "stopped"
 		gpu := ""
 		if st, ok := running[id]; ok {
@@ -141,7 +143,7 @@ func (s *Server) modelStatus() []apiModel {
 		})
 	}
 
-	for peerID, peer := range s.Cfg().Peers {
+	for peerID, peer := range cfg.Peers {
 		for _, modelID := range peer.Models {
 			models = append(models, apiModel{Id: config.PeerModelFQN(peerID, modelID), PeerID: peerID})
 		}
@@ -396,31 +398,32 @@ func (s *Server) handleAPITailcat(w http.ResponseWriter, r *http.Request) {
 // models addressed either by their fully qualified name or, where
 // unambiguous, their bare name. A "*" entry expands to every candidate.
 func (s *Server) tailcatExposedModelIDs() []string {
-	tc := s.Cfg().Tailcat
+	cfg := s.Cfg()
+	tc := cfg.Tailcat
 	if tc == nil {
 		return nil
 	}
 
 	candidates := make(map[string]struct{})
-	for id, mc := range s.Cfg().Models {
+	for id, mc := range cfg.Models {
 		candidates[id] = struct{}{}
 		for _, alias := range mc.Aliases {
 			candidates[alias] = struct{}{}
 		}
 	}
-	for selectorID := range s.Cfg().Selectors {
+	for selectorID := range cfg.Selectors {
 		candidates[selectorID] = struct{}{}
 	}
-	for peerID, peer := range s.Cfg().Peers {
+	for peerID, peer := range cfg.Peers {
 		for _, modelID := range peer.Models {
 			candidates[config.PeerModelFQN(peerID, modelID)] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.Cfg().ResolvePeerModel(modelID); found &&
+			if resolvedPeer, resolvedModel, found := cfg.ResolvePeerModel(modelID); found &&
 				resolvedPeer == peerID && resolvedModel == modelID {
 				candidates[modelID] = struct{}{}
 			}
 		}
 	}
-	if profile, ok := s.Cfg().Profiles[s.ActiveProfile()]; ok {
+	if profile, ok := cfg.Profiles[s.ActiveProfile()]; ok {
 		for pin, target := range profile.Pins {
 			if target != "" {
 				candidates[pin] = struct{}{}
@@ -495,16 +498,28 @@ func (s *Server) handleAPIGpus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(gpus)
 }
 
+// selectableGpuVendors are the vendors whose GPUs can be targeted by device
+// index (via CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES).
+var selectableGpuVendors = []string{"nvidia", "amd", "advanced micro devices"}
+
+// selectableGpuModelMarkers identify a discrete GPU by product family when the
+// detector did not report a vendor. Kept deliberately short: every entry is a
+// real NVIDIA or AMD family name, and a miss only means the GPU is absent from
+// the selector, never that a wrong device is offered.
+var selectableGpuModelMarkers = []string{"geforce", "rtx", "quadro", "tesla", "radeon", "instinct"}
+
 // isSelectableGpu reports whether a GPU can be chosen as a model's target
 // device. Integrated GPUs and NPU accelerators cannot be selected by index.
 func isSelectableGpu(vendor, model string) bool {
-	switch strings.ToLower(vendor) {
-	case "nvidia", "amd":
-		return true
+	v := strings.ToLower(vendor)
+	for _, known := range selectableGpuVendors {
+		if strings.Contains(v, known) {
+			return true
+		}
 	}
 	// Fall back to model-name heuristics when the vendor is not populated.
 	m := strings.ToLower(model)
-	for _, marker := range []string{"geforce", "rtx", "a100", "a200", "a30", "a40", "h100", "h200", "h800", "l4", "l40", "v100", "t4", "quartz", "radeon"} {
+	for _, marker := range selectableGpuModelMarkers {
 		if strings.Contains(m, marker) {
 			return true
 		}

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import * as Card from "$lib/components/ui/card/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Loader2, FileText, RefreshCw, Check, AlertTriangle } from "@lucide/svelte";
@@ -44,7 +43,7 @@
       original = data.yaml;
     } catch (error) {
       if (gen !== loadGeneration) return;
-      loadError = error instanceof Error ? error.message : "Falha ao carregar configuração";
+      loadError = error instanceof Error ? error.message : "Failed to load configuration";
     } finally {
       if (gen === loadGeneration) loading = false;
     }
@@ -75,37 +74,31 @@
         `/api/config/reload?model=${encodeURIComponent(modelId)}`,
         { method: "POST" },
       );
-      let msg = reload.ok ? "Salvo e configuração recarregada." : "Salvo (recarregar indisponível).";
+      let msg = reload.ok ? "Saved and configuration reloaded." : "Saved (reload unavailable).";
       if (reload.ok) {
         const body = (await reload.json().catch(() => ({}))) as { scope?: string };
         if (body.scope === "full") {
-          msg = "Salvo; mudança estrutural detectada — servidor fez recarga completa.";
+          msg = "Saved; structural change detected \u2014 the server did a full reload.";
         } else {
-          msg = "Salvo e apenas este modelo recarregado (demais modelos mantidos).";
+          msg = "Saved; only this model was reloaded (every other model kept running).";
         }
       }
       result = { ok: reload.ok, msg };
     } catch (error) {
-      result = { ok: false, msg: error instanceof Error ? error.message : "Falha ao salvar" };
+      result = { ok: false, msg: error instanceof Error ? error.message : "Failed to save" };
     } finally {
       saving = false;
     }
   }
 
-  onMount(() => {
-    void load();
-  });
-
-  // The SPA reuses this component when navigating between /model/[id] pages
-  // (onMount does NOT re-run), so re-load whenever the model id changes —
-  // otherwise the previous model's YAML text would be shown for the new one.
-  let lastModelId = $state(modelId);
+  // Load on mount and again whenever the model id changes. The SPA reuses this
+  // component when navigating between /models/:id pages, so a mount-only hook
+  // would leave the previous model's YAML on screen for the new one. Reading
+  // modelId here is what registers the dependency.
   $effect(() => {
-    if (modelId !== lastModelId) {
-      lastModelId = modelId;
-      result = null;
-      void load();
-    }
+    modelId;
+    result = null;
+    void load();
   });
 </script>
 
@@ -114,7 +107,7 @@
     <FileText class="size-4 text-muted-foreground" />
     <Card.Title class="text-sm">Configuration</Card.Title>
     <span class="text-muted-foreground text-xs">
-      models.{modelId} — edita o arquivo de configuração do servidor
+      models.{modelId} — edits the server's configuration file
     </span>
     <div class="ml-auto flex items-center gap-2">
       {#if result}
@@ -124,18 +117,18 @@
         </span>
       {/if}
       <Button variant="outline" size="sm" onclick={load} disabled={loading || saving}>
-        <RefreshCw class="size-3.5" /> Recarregar
+        <RefreshCw class="size-3.5" /> Reload
       </Button>
       <Button size="sm" onclick={save} disabled={saving || loading || !dirty || !yamlText}>
         {#if saving}<Loader2 class="size-3.5 animate-spin" />{:else}<Check class="size-3.5" />{/if}
-        Salvar & Recarregar
+        Save &amp; Reload
       </Button>
     </div>
   </Card.Header>
   <Card.Content class="p-0">
     {#if loading}
       <div class="flex items-center gap-2 px-4 py-6 text-sm text-muted-foreground">
-        <Loader2 class="size-4 animate-spin" /> Carregando…
+        <Loader2 class="size-4 animate-spin" /> Loading…
       </div>
     {:else if loadError}
       <div class="px-4 py-6 text-sm text-destructive">{loadError}</div>
@@ -148,8 +141,8 @@
           bind:value={yamlText}
         ></textarea>
         <p class="text-muted-foreground mt-2 text-xs">
-          YAML do bloco <code>models.{modelId}</code>. O botão Salvar valida, escreve no arquivo e
-          dispara o reload (sem restart). {dirty ? "Alterações não salvas." : "Em sincronia com o arquivo."}
+          YAML for the <code>models.{modelId}</code> block. Save validates it, writes it to the file and
+          triggers the reload (no restart). {dirty ? "Unsaved changes." : "In sync with the file."}
         </p>
       </div>
     {/if}

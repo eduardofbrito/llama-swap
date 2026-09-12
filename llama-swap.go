@@ -120,6 +120,7 @@ func main() {
 	flagListenTailcat := flag.String("listen-tailcat", "", "path to Tailcat server PrivateKey JSON file")
 	flagVersion := flag.Bool("version", false, "show version and exit")
 	flagWatchConfig := flag.Bool("watch-config", false, "reload config on file change")
+	flagEnableConfigAPI := flag.Bool("enable-config-api", false, "enable the /api/config endpoints that edit the config file from the UI (requires -config and configured apiKeys)")
 	flagValidate := flag.Bool("validate", false, "validate the config file and exit (without starting the server)")
 	flag.Parse()
 
@@ -398,9 +399,13 @@ func main() {
 		proxyLog.Info("configuration reloaded")
 	}
 
-	// Wire the config-editing endpoints once the reload closure exists.
-	// Editing requires a single -config file; with only -config-dir the
-	// endpoints stay disabled.
+	// Wire the config-editing endpoints once the reload closure exists. These
+	// endpoints let a caller write a model block — including its `cmd` — and
+	// then start it, so they are off by default and must be opted into with
+	// -enable-config-api. Editing also requires a single -config file; with
+	// only -config-dir the endpoints stay disabled. The server additionally
+	// refuses them at request time while no apiKeys are configured, so the
+	// opt-in alone cannot expose an unauthenticated write surface.
 	editPath := ""
 	if *flagConfig != "" {
 		if abs, err := filepath.Abs(*flagConfig); err == nil {
@@ -409,7 +414,17 @@ func main() {
 			editPath = *flagConfig
 		}
 	}
-	if editPath != "" {
+	switch {
+	case !*flagEnableConfigAPI:
+		if editPath != "" {
+			proxyLog.Debug("config editing API disabled (pass -enable-config-api to turn it on)")
+		}
+	case editPath == "":
+		proxyLog.Warn("-enable-config-api ignored: config editing requires a single -config file")
+	default:
+		if len(cfg.RequiredAPIKeys) == 0 {
+			proxyLog.Warn("-enable-config-api is on but no apiKeys are configured; the config endpoints will refuse requests until at least one key is set")
+		}
 		wireConfigEdit = func(srv *server.Server) {
 			srv.WithConfigEdit(editPath, reload)
 			srv.WithConfigDir(*flagConfigDir)

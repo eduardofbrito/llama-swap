@@ -22,6 +22,36 @@ func isReadOnlyErr(err error) bool {
 // interleave read-modify-write cycles.
 var editMu sync.Mutex
 
+// configFileRead parses the config file at path and hands the document to fn
+// for inspection. It never writes: a read must not reformat the operator's
+// file, bump its mtime (which would wake the -watch-config watcher and force a
+// full reload), or fail on a read-only bind mount. fn must treat the document
+// as immutable; use ConfigFileEdit to change it.
+func configFileRead(path string, fn func(doc *yaml.Node) error) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading config file: %w", err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("parsing config file: %w", err)
+	}
+	if fn == nil {
+		return nil
+	}
+	return fn(&doc)
+}
+
+// fileMode returns the file's current permission bits so a rewrite preserves
+// them. It falls back to 0o644 when the file cannot be stat'ed.
+func fileMode(path string) os.FileMode {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0o644
+	}
+	return info.Mode().Perm()
+}
+
 // ConfigFileEdit applies fn to the parsed document of the config file at
 // path and writes the result back atomically. fn may restructure the
 // document; the modified document is validated with the regular load
@@ -52,12 +82,22 @@ func ConfigFileEdit(path string, fn func(doc *yaml.Node) error) error {
 		return fmt.Errorf("resulting config is invalid: %w", err)
 	}
 
+	// The replacement inherits the original file's permission bits: a config
+	// deliberately restricted to 0600 (it can hold API keys) must not come
+	// back world-readable.
+	mode := fileMode(path)
 	tmp := fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	if err := os.WriteFile(tmp, out, mode); err != nil {
 		if isReadOnlyErr(err) {
 			return fmt.Errorf("config file is mounted read-only; remount it writable (drop :ro in the volume) to edit from the UI: %w", err)
 		}
 		return fmt.Errorf("writing config file: %w", err)
+	}
+	// WriteFile only applies mode when it creates the file; a leftover temp
+	// file from an earlier crash would keep its old bits, so set them here.
+	if err := os.Chmod(tmp, mode); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("setting config file permissions: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		// Renaming over a bind mount (e.g. Docker -v file:/app/config.yaml)
@@ -95,10 +135,13 @@ func writeInPlace(path string, data []byte) error {
 
 // ModelYAMLText returns the YAML text of one model's block as written in the
 // config file. found is false when the file has no block for the model ID.
+// It is a pure read: the config file on disk is never touched, so opening the
+// UI's Conf tab cannot reformat the file, trigger the config watcher, or fail
+// against a read-only bind mount.
 func ModelYAMLText(path, modelID string) (string, bool, error) {
 	var text string
 	var found bool
-	err := ConfigFileEdit(path, func(doc *yaml.Node) error {
+	err := configFileRead(path, func(doc *yaml.Node) error {
 		root, err := rootMapping(doc)
 		if err != nil {
 			return err
@@ -176,11 +219,11 @@ func AddModelYAML(path, modelID, modelYAML string) error {
 // The authoritative validation still runs in ConfigFileEdit, which loads the
 // whole resulting document through the normal pipeline before writing.
 func ValidateModelYAML(modelYAML string) error {
-	node, err := parseModelBlock(modelYAML)
-	if err != nil {
+	// parseModelBlock enforces the shape (a single YAML mapping); the node
+	// itself is not needed here, only the error it reports.
+	if _, err := parseModelBlock(modelYAML); err != nil {
 		return err
 	}
-	_ = node // mapping shape already enforced by parseModelBlock
 	var mc ModelConfig
 	if err := yaml.Unmarshal([]byte(strings.TrimSpace(modelYAML)), &mc); err != nil {
 		return fmt.Errorf("model block does not map to a model config: %w", err)

@@ -23,20 +23,26 @@ Features added in this fork on top of upstream `main`:
   - An inference request (POST) for an unloaded manual-only model is answered immediately with a `503` (`manual_load_required`) instead of starting — or queueing — a load, so upstream clients like LiteLLM fail over to their fallback right away
   - A manual model that **is** loaded still serves normally, and it can be started on purpose: the dashboard's load buttons (a GET against the model endpoint) are honored
   - The Models list shows a `manual` badge on such models; combine with a `persistent` group to keep it resident
+  - See [routing capacity and request queues](docs/kb/guides/routing/capacity-and-queues.md) for the full behaviour and failure modes
 - ✅ **GPUs page** (`/gpus` menu item, right below Models)
   - Lists every GPU the host exposes with the model(s) currently loaded on each
   - Load/unload controls per GPU for every model defined in the config (a model running on another GPU is swapped over)
 - ✅ **Model config tab** (`Models / <model>`, `Conf` tab)
-  - Shows the model's block from the config file as editable YAML
-  - Saving validates the block, writes it back to the file (other models, comments and unrelated keys are preserved; the full result is validated through the config load pipeline before the file is touched, and the write is atomic) and triggers a hot reload — no restart
+  - Shows the model's block from the config file as editable YAML. Reading is a pure read: the file on disk is never rewritten, so nothing is reformatted and `-watch-config` is not woken
+  - Saving validates the block, writes it back to the file (other models, comments, unrelated keys and the file's permission bits are preserved; the full result is validated through the config load pipeline before the file is touched, and the write is atomic) and triggers a hot reload — no restart
 - ✅ **Add model from the UI** - the Models page has an **Add Model** dialog that appends a new `models:` block to the config file (duplicate IDs rejected) and hot-reloads
-- ✅ **Config API** - machine-accessible endpoints behind the API auth chain:
+- ✅ **Config API** - machine-accessible endpoints, **off by default**:
   - `GET /api/gpus` - list the GPUs available for model loading (real device indexes)
+  - `GET /api/config/status` - whether config editing is available on this instance (the UI hides the `Conf` tab and **Add Model** when it is not)
   - `GET /api/config/model/{model_id}` - one model's block from the config file as YAML
   - `PUT /api/config/model/{model_id}` - replace one model's block (invalid YAML → 422, file untouched)
   - `POST /api/config/model` - add a new model block (`{"id": ..., "yaml": ...}`)
   - `POST /api/config/reload` - hot reload the config without a restart
-  - The four `/api/config/...` endpoints return 501 when the process was started without a single `-config` file (e.g. only `-config-dir`)
+
+> [!WARNING]
+> A caller that can write a model block chooses that model's `cmd` and can then start it, which is arbitrary command execution on the host. The editing endpoints are therefore gated twice:
+> 1. start llama-swap with `-enable-config-api` (and a single `-config` file); otherwise they return **501**, and
+> 2. configure at least one key under `apiKeys`; otherwise they return **403**. llama-swap's auth middleware is a deliberate pass-through when no keys are set, so this second gate is what keeps the opt-in from publishing an unauthenticated write surface.
 
 ## Features:
 
@@ -79,6 +85,7 @@ Features added in this fork on top of upstream `main`:
   - `GET /api/profiles` - list configured profiles and the active selection
   - `PUT /api/profiles/active` - activate a profile or select none
   - `GET /api/gpus` - list the GPUs available for model loading (fork)
+  - `GET /api/config/status` - report whether config editing is enabled (fork)
   - `GET /api/config/model/:model_id` - read one model's block from the config file as YAML (fork)
   - `PUT /api/config/model/:model_id` - replace one model's block in the config file (fork)
   - `POST /api/config/model` - add a new model block to the config file (fork)
@@ -133,6 +140,7 @@ Model config tab and Add Model (fork):
 
 - `Models / <model>` has a `Conf` tab with the model's block from the config file as editable YAML; saving validates, writes back and hot-reloads without a restart
 - The Models page has an `Add Model` dialog that appends a new model to the config file
+- Both are hidden unless the server was started with `-enable-config-api` and has `apiKeys` configured
 
 Real time log streaming:
 
@@ -378,7 +386,8 @@ people ask about most.
 You can also edit the config from the web UI (fork): the `Conf` tab of each model
 (`Models / <model>`) edits that model's block in place, and the `Add Model` dialog on
 the Models page appends new models. Both validate, write back and hot-reload without
-a restart.
+a restart. Editing is off unless you start llama-swap with `-enable-config-api` and
+configure `apiKeys`; until then the UI hides both controls.
 
 You can also just ask. The **Help** page (in the sidebar) is an agent that calls
 llama-swap's own documentation tools and answers questions about your

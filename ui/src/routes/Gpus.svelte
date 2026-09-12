@@ -62,7 +62,7 @@
     try {
       await unloadSingleModel(model.id);
     } catch (error) {
-      errors[key] = error instanceof Error ? error.message : "Falha ao descarregar modelo";
+      errors[key] = error instanceof Error ? error.message : "Failed to unload model";
     } finally {
       busy[key] = false;
     }
@@ -86,14 +86,14 @@
   <div class="mt-4 mb-4">
     <h3 class="text-lg font-semibold">GPUs</h3>
     <p class="text-sm text-muted-foreground">
-      GPUs disponíveis no host, o modelo carregado em cada uma e a opção de
-      carregar/descarregar os modelos definidos na configuração.
+      GPUs available on this host, the models loaded on each one, and controls
+      to load or unload any model defined in the configuration.
     </p>
   </div>
 
   {#if $gpus.length === 0}
     <div class="rounded-lg border p-6 text-sm text-muted-foreground">
-      Nenhuma GPU detectada no host (ou indisponível para seleção).
+      No GPUs detected on this host (or none available for selection).
     </div>
   {:else}
     <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
@@ -111,17 +111,17 @@
             <h5 class="font-medium">{gpu.label}</h5>
             {#if loaded.length === 0}
               <span class="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                Livre
+                Idle
               </span>
             {:else}
               <span class="ml-auto rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">
-                Em uso
+                In use
               </span>
             {/if}
           </div>
 
           {#if loaded.length === 0}
-            <p class="text-sm text-muted-foreground">Nenhum modelo carregado.</p>
+            <p class="text-sm text-muted-foreground">No models loaded.</p>
           {:else}
             <ul class="flex flex-col gap-1.5">
               {#each loaded as model (model.id)}
@@ -137,11 +137,11 @@
                     variant="outline"
                     disabled={busy[key]}
                     onclick={() => handleUnload(gpu, model)}
-                    title={`Descarregar ${model.id}`}
+                    title={`Unload ${model.id}`}
                     class="h-7 shrink-0"
                   >
                     <ArrowDownToLine class="size-3.5" />
-                    Descarregar
+                    Unload
                   </Button>
                 </li>
               {/each}
@@ -151,7 +151,7 @@
           {#if available.length > 0}
             <div class="mt-3 border-t pt-3">
               <p class="mb-2 text-xs font-medium text-muted-foreground">
-                Carregar modelo
+                Load model
               </p>
               <div class="flex flex-col gap-1.5">
                 {#each available as model (model.id)}
@@ -161,7 +161,7 @@
                       {model.id}
                       {#if model.state !== "stopped" && model.state !== "shutdown"}
                         <span class="text-xs text-muted-foreground">
-                          (em {model.state} em outra GPU)
+                          ({model.state} on another GPU)
                         </span>
                       {/if}
                     </span>
@@ -170,11 +170,11 @@
                       variant="outline"
                       disabled={busy[key]}
                       onclick={() => handleLoad(gpu, model)}
-                      title={`Carregar ${model.id} na ${gpu.label}`}
+                      title={`Load ${model.id} onto ${gpu.label}`}
                       class="h-7 shrink-0"
                     >
                       <ArrowUpToLine class="size-3.5" />
-                      Carregar
+                      Load
                     </Button>
                   </div>
                   {#if errors[key]}

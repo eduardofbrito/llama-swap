@@ -64,6 +64,11 @@ export const versionInfo = writable<VersionInfo>({
 // connected; empty means the host reports no selectable GPU, so the UI hides
 // the per-model GPU selector and the configured default always applies.
 export const gpus = writable<GpuInfo[]>([]);
+// Whether this instance allows editing the config file from the UI. It is off
+// unless the operator started llama-swap with -enable-config-api and configured
+// apiKeys, so the Conf tab and the Add Model dialog stay hidden by default
+// rather than offering controls that can only fail.
+export const configEditable = writable<boolean>(false);
 
 let apiEventSource: EventSource | null = null;
 let profileRevision = 0;
@@ -120,10 +125,12 @@ export function enableAPIEvents(enabled: boolean): void {
       activeProfile.set(null);
       profileRevision++;
       gpus.set([]);
+      configEditable.set(false);
       retryCount = 0;
       connectionState.set("connected");
       void fetchProfiles().catch((error) => console.error(error));
       void fetchGpus().catch((error) => console.error(error));
+      void fetchConfigEditable().catch((error) => console.error(error));
       void fetchTailcatStatus().catch((error) => console.error(error));
     };
 
@@ -532,6 +539,21 @@ export async function fetchGpus(): Promise<GpuInfo[]> {
   const list = Array.isArray(data) ? data : [];
   gpus.set(list);
   return list;
+}
+
+// fetchConfigEditable asks the server whether the config-editing endpoints are
+// usable on this instance. A failure is not an error worth surfacing: it simply
+// leaves the editing UI hidden.
+export async function fetchConfigEditable(): Promise<boolean> {
+  const response = await fetch("/api/config/status");
+  if (!response.ok) {
+    configEditable.set(false);
+    return false;
+  }
+  const data = (await response.json()) as { editable?: boolean };
+  const editable = data.editable === true;
+  configEditable.set(editable);
+  return editable;
 }
 
 export async function getHardware(): Promise<HardwareSnapshot> {

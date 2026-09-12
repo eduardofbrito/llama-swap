@@ -32,11 +32,10 @@ func NewMatrix(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Matr
 	// Build a process for every model in the config. Any model can run alone
 	// even if it is not part of a set; this mirrors proxy.NewMatrix.
 	processes := make(map[string]process.Process, len(conf.Models))
-	base, err := newBaseRouter("matrix", conf, processes, proxylog, swapper)
+	base, err := newBaseRouter("matrix", conf, processes, proxylog, upstreamlog, swapper)
 	if err != nil {
 		return nil, fmt.Errorf("creating base router: %w", err)
 	}
-	base.upstreamlog = upstreamlog
 
 	for mid, modelCfg := range conf.Models {
 		procLog := logmon.NewWriter(upstreamlog)

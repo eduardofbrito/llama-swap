@@ -156,8 +156,8 @@ func (e ConcurrencyLimitError) message() string {
 // a manualOnly model. The model is never started (or queued) for such
 // requests: clients like LiteLLM want the fast 503 so they can fail over to
 // their fallback immediately. Loading a manual model on purpose is an explicit
-// operator action (the UI load button marks the request with the
-// llama-swap-load query parameter) and is not rejected.
+// operator action — a GET against the model endpoint, the shape the dashboard's
+// load buttons use — and is not rejected; inference calls (POST) are.
 type ManualLoadError struct {
 	ModelID string
 }

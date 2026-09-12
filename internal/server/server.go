@@ -493,6 +493,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/gpus", apiChain.ThenFunc(s.handleAPIGpus))
 	mux.Handle("GET /api/tailcat", apiChain.ThenFunc(s.handleAPITailcat))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
+	mux.Handle("GET /api/config/status", apiChain.ThenFunc(s.handleAPIConfigStatus))
 	mux.Handle("GET /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIGetModelConfig))
 	mux.Handle("PUT /api/config/model/{model...}", apiChain.ThenFunc(s.handleAPIPutModelConfig))
 	mux.Handle("POST /api/config/model", apiChain.ThenFunc(s.handleAPIAddModel))

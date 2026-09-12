@@ -435,6 +435,17 @@ models:
     # - recommended to be omitted and the default used
     concurrencyLimit: 0
 
+    # manualOnly: never load this model on demand
+    # - optional, default: false
+    # - an inference request for an unloaded manualOnly model gets an immediate
+    #   HTTP 503 (manual_load_required) instead of starting or queueing a load,
+    #   so upstream clients (LiteLLM, OpenWebUI, ...) fail over to their
+    #   fallback right away instead of waiting out a cold start
+    # - the model serves normally once it is loaded; an operator starts it from
+    #   the dashboard's load button
+    # - useful for a large model that must only run when someone asks for it
+    manualOnly: false
+
     # sendLoadingState: overrides the global sendLoadingState setting for this model
     # - optional, default: undefined (use global setting)
     sendLoadingState: false

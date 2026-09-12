@@ -136,3 +136,66 @@ models:
 		t.Errorf("top-level healthCheckTimeout = %d, want 30", c.HealthCheckTimeout)
 	}
 }
+
+// TestConfigFileEdit_ReadDoesNotWriteFile pins the invariant that reading a
+// model's block is a pure read. A rewrite here would reformat the operator's
+// file, bump its mtime/size (waking the -watch-config watcher into a full
+// reload that drops every running model), and fail outright on a read-only
+// bind mount.
+func TestConfigFileEdit_ReadDoesNotWriteFile(t *testing.T) {
+	const original = `# top comment
+models:
+  alpha:
+    # keep this comment
+    proxy: http://127.0.0.1:11435
+`
+	p := writeTestConfig(t, original)
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+
+	if _, _, err := ModelYAMLText(p, "alpha"); err != nil {
+		t.Fatalf("ModelYAMLText: %v", err)
+	}
+	// A model that is not in the file must not write either.
+	if _, _, err := ModelYAMLText(p, "ghost"); err != nil {
+		t.Fatalf("ModelYAMLText(ghost): %v", err)
+	}
+
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	if string(data) != original {
+		t.Errorf("reading rewrote the config file:\ngot:\n%s\nwant:\n%s", data, original)
+	}
+	after, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !before.ModTime().Equal(after.ModTime()) || before.Size() != after.Size() {
+		t.Errorf("reading changed file metadata (mtime %v -> %v, size %d -> %d); the config watcher would fire",
+			before.ModTime(), after.ModTime(), before.Size(), after.Size())
+	}
+}
+
+// TestConfigFileEdit_PreservesFileMode checks that a write keeps the config
+// file's permission bits: a config restricted to 0600 (it can hold API keys)
+// must not come back world-readable.
+func TestConfigFileEdit_PreservesFileMode(t *testing.T) {
+	p := writeTestConfig(t, "models:\n  alpha:\n    proxy: http://127.0.0.1:11435\n")
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := ReplaceModelYAML(p, "alpha", "proxy: http://127.0.0.1:22435\n"); err != nil {
+		t.Fatalf("ReplaceModelYAML: %v", err)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("file mode = %v, want 0600 (permissions must survive an edit)", got)
+	}
+}

@@ -90,21 +90,28 @@ type baseRouter struct {
 	testProcessed chan struct{}
 }
 
+// newBaseRouter builds the shared router machinery. upstreamlog is required:
+// RefreshModel builds replacement child processes from it, so it is a
+// constructor parameter rather than a field a concrete router has to remember
+// to assign afterwards.
 func newBaseRouter(
 	name string,
 	conf config.Config,
 	processes map[string]process.Process,
 	logger *logmon.Monitor,
+	upstreamlog *logmon.Monitor,
 	planner scheduler.Swapper,
 ) (*baseRouter, error) {
+	if upstreamlog == nil {
+		return nil, fmt.Errorf("%s: upstreamlog is required", name)
+	}
 	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
 	procCtx, procCancel := context.WithCancel(context.Background())
 	confPtr := &conf
 	b := &baseRouter{
 		name:        name,
-		config:      atomic.Pointer[config.Config]{},
-		processes:   atomic.Pointer[map[string]process.Process]{},
 		logger:      logger,
+		upstreamlog: upstreamlog,
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 		procCtx:     procCtx,

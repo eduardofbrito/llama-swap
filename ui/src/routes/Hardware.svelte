@@ -53,9 +53,9 @@
 
   function acceleratorSummary(accelerator: HardwareAccelerator): string[] {
     return [
-      `GPU ${accelerator.index + 1} (index ${accelerator.index}): ${acceleratorTitle(accelerator)}`,
+      `GPU ${accelerator.index + 1}: ${acceleratorTitle(accelerator)}`,
       `  Type: ${titleCase(accelerator.kind)}`,
-      `  GPU Index: ${accelerator.index}`,
+      `  Device Index: ${shown(accelerator.device_index)}`,
       `  Vendor: ${shown(accelerator.vendor)}`,
       `  Architecture: ${shown(accelerator.architecture)}`,
       `  Memory: ${accelerator.memory.capacity_bytes ? formatCapacity(accelerator.memory.capacity_bytes) : "Not detected"} (${titleCase(accelerator.memory.kind)})`,
@@ -166,11 +166,16 @@
               {#each hardware.accelerators as accelerator (accelerator.index)}
                 <article class="rounded-md border bg-muted/20 p-3">
                   <div class="mb-3">
-                    <h5 class="font-medium">{acceleratorTitle(accelerator)} <span class="text-xs text-muted-foreground">(index {accelerator.index})</span></h5>
+                    <h5 class="font-medium">
+                      {acceleratorTitle(accelerator)}
+                      {#if accelerator.device_index !== null && accelerator.device_index !== undefined}
+                        <span class="text-xs text-muted-foreground">(device {accelerator.device_index})</span>
+                      {/if}
+                    </h5>
                     <p class="text-xs text-muted-foreground">{shown(accelerator.vendor)} · {titleCase(accelerator.kind)}</p>
                   </div>
                   <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
-                    <dt class="text-muted-foreground">GPU Index</dt><dd>{accelerator.index}</dd>
+                    <dt class="text-muted-foreground">Device Index</dt><dd>{shown(accelerator.device_index)}</dd>
                     <dt class="text-muted-foreground">Architecture</dt><dd>{shown(accelerator.architecture)}</dd>
                     <dt class="text-muted-foreground">Memory</dt>
                     <dd>{accelerator.memory.capacity_bytes ? formatCapacity(accelerator.memory.capacity_bytes) : "Not detected"} ({titleCase(accelerator.memory.kind)})</dd>

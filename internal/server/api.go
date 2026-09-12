@@ -136,8 +136,11 @@ func filterCappedMetadata(md map[string]any) map[string]any {
 // handleListModels serves the OpenAI-compatible model listing: local models
 // (with optional aliases) plus peer models.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	// One snapshot for the whole response: a reload may swap the live config
+	// mid-handler, and a torn view would mix old and new models in one list.
+	cfg := s.Cfg()
 	created := time.Now().Unix()
-	data := make([]modelRecord, 0, len(s.Cfg().Models)+len(s.Cfg().Selectors))
+	data := make([]modelRecord, 0, len(cfg.Models)+len(cfg.Selectors))
 	running := s.local.RunningModels()
 	modelIDs := make(map[string]struct{})
 
@@ -190,7 +193,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return rec
 	}
 
-	for id, mc := range s.Cfg().Models {
+	for id, mc := range cfg.Models {
 		modelIDs[id] = struct{}{}
 		for _, alias := range mc.Aliases {
 			modelIDs[alias] = struct{}{}
@@ -209,7 +212,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, newRecord(id, mc.Name, mc.Description, mc.Metadata, mc.Capabilities, status, internalMetadata))
 
-		if s.Cfg().IncludeAliasesInList {
+		if cfg.IncludeAliasesInList {
 			for _, alias := range mc.Aliases {
 				if alias := strings.TrimSpace(alias); alias != "" {
 					data = append(data, newRecord(
@@ -226,11 +229,11 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for peerID, peer := range s.Cfg().Peers {
+	for peerID, peer := range cfg.Peers {
 		for _, modelID := range peer.Models {
 			fqn := config.PeerModelFQN(peerID, modelID)
 			modelIDs[fqn] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.Cfg().ResolvePeerModel(modelID); found &&
+			if resolvedPeer, resolvedModel, found := cfg.ResolvePeerModel(modelID); found &&
 				resolvedPeer == peerID && resolvedModel == modelID {
 				modelIDs[modelID] = struct{}{}
 			}
@@ -246,14 +249,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for selectorID, selector := range s.Cfg().Selectors {
+	for selectorID, selector := range cfg.Selectors {
 		modelIDs[selectorID] = struct{}{}
 		if selector.Unlisted {
 			continue
 		}
 		status := "unloaded"
 		for _, target := range selector.Targets {
-			modelID, local := s.Cfg().RealModelName(target)
+			modelID, local := cfg.RealModelName(target)
 			if local {
 				state := running[modelID]
 				if state == process.StateReady || state == process.StateStarting {
@@ -283,7 +286,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		))
 	}
 
-	if profile, ok := s.Cfg().Profiles[s.ActiveProfile()]; ok {
+	if profile, ok := cfg.Profiles[s.ActiveProfile()]; ok {
 		for pin, target := range profile.Pins {
 			if target == "" {
 				continue
@@ -305,7 +308,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	sort.Slice(data, func(i, j int) bool { return data[i].ID < data[j].ID })
 	if isTailcatRequest(r.Context()) {
-		exposed := s.Cfg().Tailcat
+		exposed := cfg.Tailcat
 		filtered := data[:0]
 		if exposed != nil {
 			for _, record := range data {

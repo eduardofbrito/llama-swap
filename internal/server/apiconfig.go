@@ -14,21 +14,60 @@ import (
 // config package's node surgery (comments preserved, atomic replace) and the
 // result is validated with the full load pipeline before the file is
 // written. The UI's model detail "Conf" tab and the add-model dialog consume
-// these; both run behind the API auth chain.
+// these.
+//
+// Access control matters more here than on the rest of the API: a caller that
+// can write a model block can choose that model's `cmd` and then start it with
+// a plain GET /upstream/<id>/, which is arbitrary command execution on the
+// host. Two gates therefore guard every handler below, on top of the API auth
+// chain they are mounted on:
+//
+//  1. the operator must opt in with -enable-config-api (which also requires a
+//     single -config file); without it s.configPath is empty and the endpoints
+//     report 501, and
+//  2. the config must declare at least one apiKey. The auth middleware is a
+//     deliberate pass-through when no keys are configured, so without this
+//     check the opt-in alone would publish an unauthenticated write surface.
 
-func (s *Server) requireConfigFile(w http.ResponseWriter, r *http.Request) bool {
+// configEditingStatus reports whether config editing is available, and why not
+// when it is unavailable. The HTTP status is the one a config endpoint answers
+// with in that state.
+func (s *Server) configEditingStatus() (editable bool, status int, reason string) {
 	if s.configPath == "" {
-		swaputil.SendResponse(w, r, http.StatusNotImplemented,
-			"config editing requires a single -config file (this instance was not started with one)")
-		return false
+		return false, http.StatusNotImplemented,
+			"config editing is disabled; start llama-swap with -enable-config-api and a single -config file to turn it on"
 	}
-	return true
+	if len(s.Cfg().RequiredAPIKeys) == 0 {
+		return false, http.StatusForbidden,
+			"config editing requires authentication; add at least one entry under apiKeys in the config file"
+	}
+	return true, http.StatusOK, ""
+}
+
+// requireConfigEditing reports whether config editing is available for this
+// request, writing the appropriate refusal when it is not.
+func (s *Server) requireConfigEditing(w http.ResponseWriter, r *http.Request) bool {
+	editable, status, reason := s.configEditingStatus()
+	if !editable {
+		swaputil.SendResponse(w, r, status, reason)
+	}
+	return editable
+}
+
+// handleAPIConfigStatus tells the UI whether the config-editing endpoints are
+// usable, so it can hide the Conf tab and the Add Model dialog instead of
+// offering controls that can only fail.
+// GET /api/config/status
+func (s *Server) handleAPIConfigStatus(w http.ResponseWriter, r *http.Request) {
+	editable, _, reason := s.configEditingStatus()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"editable": editable, "reason": reason})
 }
 
 // handleAPIGetModelConfig serves one model's block from the config file.
 // GET /api/config/model/{model...}
 func (s *Server) handleAPIGetModelConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigFile(w, r) {
+	if !s.requireConfigEditing(w, r) {
 		return
 	}
 	modelID := r.PathValue("model")
@@ -53,7 +92,7 @@ type modelConfigBody struct {
 // handleAPIPutModelConfig replaces one model's block in the config file.
 // PUT /api/config/model/{model...}
 func (s *Server) handleAPIPutModelConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigFile(w, r) {
+	if !s.requireConfigEditing(w, r) {
 		return
 	}
 	modelID := r.PathValue("model")
@@ -80,7 +119,7 @@ type addModelBody struct {
 // handleAPIAddModel appends a new model's block to the config file.
 // POST /api/config/model
 func (s *Server) handleAPIAddModel(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigFile(w, r) {
+	if !s.requireConfigEditing(w, r) {
 		return
 	}
 	var body addModelBody
@@ -117,22 +156,18 @@ func (s *Server) handleAPIAddModel(w http.ResponseWriter, r *http.Request) {
 //	(group/matrix/selector/profile/global
 //	changes) or the surgical refresh fails.
 func (s *Server) handleAPIReloadConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requireConfigFile(w, r) {
-		return
-	}
-	model := r.URL.Query().Get("model")
-	if model == "" {
-		if s.reloadFn == nil {
-			swaputil.SendResponse(w, r, http.StatusNotImplemented, "config reload is not wired on this instance")
-			return
-		}
-		go s.reloadFn()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"msg": "reload triggered"})
+	if !s.requireConfigEditing(w, r) {
 		return
 	}
 	if s.reloadFn == nil {
 		swaputil.SendResponse(w, r, http.StatusNotImplemented, "config reload is not wired on this instance")
+		return
+	}
+	model := r.URL.Query().Get("model")
+	if model == "" {
+		go s.reloadFn()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"msg": "reload triggered"})
 		return
 	}
 	if err := s.SurgicalReload(model); err != nil {

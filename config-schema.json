@@ -542,6 +542,11 @@
                         "default": 0,
                         "description": "Overrides allowed number of active parallel requests to a model. 0 uses internal default of 10. >0 overrides default. Requests exceeding limit get HTTP 429."
                     },
+                    "manualOnly": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true the model is never loaded on demand. Inference requests for it are answered immediately with HTTP 503 (manual_load_required) instead of starting or queueing a load, so upstream clients fail over to a fallback right away. The model still serves normally once loaded, and an operator can start it from the dashboard."
+                    },
                     "sendLoadingState": {
                         "type": "boolean",
                         "description": "Overrides the global sendLoadingState for this model. Ommitting this property will use the global setting."
