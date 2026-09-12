@@ -58,9 +58,25 @@
       }
       // Re-read the canonical text the server wrote (formatting/round-trip).
       await load();
-      // Apply without restart.
-      const reload = await fetch("/api/config/reload", { method: "POST" });
-      result = { ok: true, msg: reload.ok ? "Salvo e configuração recarregada." : "Salvo (recarregar indisponível)." };
+      // Apply WITHOUT a full server rebuild: ask the backend to reload only
+      // this model's config/process. The server diffs the file against the
+      // live config and, when the change is model-only, swaps just this model
+      // (every other running model is left untouched). If the diff is not
+      // model-only the server falls back to a full reload on its own.
+      const reload = await fetch(
+        `/api/config/reload?model=${encodeURIComponent(modelId)}`,
+        { method: "POST" },
+      );
+      let msg = reload.ok ? "Salvo e configuração recarregada." : "Salvo (recarregar indisponível).";
+      if (reload.ok) {
+        const body = (await reload.json().catch(() => ({}))) as { scope?: string };
+        if (body.scope === "full") {
+          msg = "Salvo; mudança estrutural detectada — servidor fez recarga completa.";
+        } else {
+          msg = "Salvo e apenas este modelo recarregado (demais modelos mantidos).";
+        }
+      }
+      result = { ok: reload.ok, msg };
     } catch (error) {
       result = { ok: false, msg: error instanceof Error ? error.message : "Falha ao salvar" };
     } finally {

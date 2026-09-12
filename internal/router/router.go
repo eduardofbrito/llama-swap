@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/logmon"
 	"github.com/mostlygeek/llama-swap/internal/process"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
@@ -58,4 +59,12 @@ type LocalRouter interface {
 	// modelID must be a real (non-alias) config key. Returns false when the
 	// model is not known to this router.
 	ProcessLogger(modelID string) (*logmon.Monitor, bool)
+
+	// RefreshModel surgically replaces the named model's config and process
+	// without touching any other model. The full config (not just the model
+	// block) must already be loaded and current: it is the source of truth for
+	// the refreshed process. A returned error means the router was left
+	// untouched (e.g. the replacement process failed to build) and the old
+	// process is still serving.
+	RefreshModel(modelID string, newCfg config.Config) error
 }

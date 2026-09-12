@@ -54,7 +54,7 @@ profiles:
 func profileTestServer(t *testing.T, cfg config.Config, local *stubRouter) *Server {
 	t.Helper()
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = cfg
+	s.SetCfg(cfg)
 	s.routes()
 	t.Cleanup(func() { s.store.Close() })
 	return s
@@ -211,7 +211,7 @@ profiles:
 `))
 	require.NoError(t, err)
 	s := upstreamMetricsServer(t, `{"usage":{"prompt_tokens":2,"completion_tokens":3}}`)
-	s.cfg = cfg
+	s.SetCfg(cfg)
 	s.routes()
 	_, err = s.setActiveProfile("test")
 	require.NoError(t, err)

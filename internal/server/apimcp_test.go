@@ -436,7 +436,7 @@ func TestServer_APIMCP_EchoesProtocolVersionHeader(t *testing.T) {
 
 func TestServer_APIMCP_RequiresAPIKey(t *testing.T) {
 	s := newMCPServer()
-	s.cfg = config.Config{RequiredAPIKeys: []string{"sk-test"}}
+	s.SetCfg(config.Config{RequiredAPIKeys: []string{"sk-test"}})
 	s.routes()
 
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`

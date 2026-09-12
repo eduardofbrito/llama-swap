@@ -137,7 +137,7 @@ func filterCappedMetadata(md map[string]any) map[string]any {
 // (with optional aliases) plus peer models.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
-	data := make([]modelRecord, 0, len(s.cfg.Models)+len(s.cfg.Selectors))
+	data := make([]modelRecord, 0, len(s.Cfg().Models)+len(s.Cfg().Selectors))
 	running := s.local.RunningModels()
 	modelIDs := make(map[string]struct{})
 
@@ -190,7 +190,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return rec
 	}
 
-	for id, mc := range s.cfg.Models {
+	for id, mc := range s.Cfg().Models {
 		modelIDs[id] = struct{}{}
 		for _, alias := range mc.Aliases {
 			modelIDs[alias] = struct{}{}
@@ -209,7 +209,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, newRecord(id, mc.Name, mc.Description, mc.Metadata, mc.Capabilities, status, internalMetadata))
 
-		if s.cfg.IncludeAliasesInList {
+		if s.Cfg().IncludeAliasesInList {
 			for _, alias := range mc.Aliases {
 				if alias := strings.TrimSpace(alias); alias != "" {
 					data = append(data, newRecord(
@@ -226,11 +226,11 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for peerID, peer := range s.cfg.Peers {
+	for peerID, peer := range s.Cfg().Peers {
 		for _, modelID := range peer.Models {
 			fqn := config.PeerModelFQN(peerID, modelID)
 			modelIDs[fqn] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(modelID); found &&
+			if resolvedPeer, resolvedModel, found := s.Cfg().ResolvePeerModel(modelID); found &&
 				resolvedPeer == peerID && resolvedModel == modelID {
 				modelIDs[modelID] = struct{}{}
 			}
@@ -246,14 +246,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	for selectorID, selector := range s.cfg.Selectors {
+	for selectorID, selector := range s.Cfg().Selectors {
 		modelIDs[selectorID] = struct{}{}
 		if selector.Unlisted {
 			continue
 		}
 		status := "unloaded"
 		for _, target := range selector.Targets {
-			modelID, local := s.cfg.RealModelName(target)
+			modelID, local := s.Cfg().RealModelName(target)
 			if local {
 				state := running[modelID]
 				if state == process.StateReady || state == process.StateStarting {
@@ -283,7 +283,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		))
 	}
 
-	if profile, ok := s.cfg.Profiles[s.ActiveProfile()]; ok {
+	if profile, ok := s.Cfg().Profiles[s.ActiveProfile()]; ok {
 		for pin, target := range profile.Pins {
 			if target == "" {
 				continue
@@ -305,7 +305,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	sort.Slice(data, func(i, j int) bool { return data[i].ID < data[j].ID })
 	if isTailcatRequest(r.Context()) {
-		exposed := s.cfg.Tailcat
+		exposed := s.Cfg().Tailcat
 		filtered := data[:0]
 		if exposed != nil {
 			for _, record := range data {
@@ -354,7 +354,7 @@ func (s *Server) handleRunning(w http.ResponseWriter, r *http.Request) {
 	states := s.local.RunningModels()
 	list := make([]runningModel, 0, len(states))
 	for id, state := range states {
-		mc := s.cfg.Models[id]
+		mc := s.Cfg().Models[id]
 		list = append(list, runningModel{
 			Model:       id,
 			State:       string(state),
@@ -393,7 +393,7 @@ func (d *discardResponseWriter) WriteHeader(status int) { d.status = status }
 // Hooks.OnStartup.Preload so they are warm before the first real request.
 // Preload names are already resolved to real model IDs by config loading.
 func (s *Server) startPreload() {
-	models := s.cfg.Hooks.OnStartup.Preload
+	models := s.Cfg().Hooks.OnStartup.Preload
 	if len(models) == 0 {
 		return
 	}
@@ -462,7 +462,7 @@ func handleComfyUIRedirect(w http.ResponseWriter, r *http.Request) {
 // handleComfyUI proxies requests under /comfyui/ to the fixed local
 // ComfyUI model. Its compatibility settings are applied while loading config.
 func (s *Server) handleComfyUI(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.cfg.Models[config.ComfyUIModelID]; !ok || !s.local.Handles(config.ComfyUIModelID) {
+	if _, ok := s.Cfg().Models[config.ComfyUIModelID]; !ok || !s.local.Handles(config.ComfyUIModelID) {
 		swaputil.SendResponse(w, r, http.StatusNotFound, "local model "+config.ComfyUIModelID+" not found")
 		return
 	}
@@ -501,7 +501,7 @@ func (s *Server) handleComfyUI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	upstreamPath := r.PathValue("upstreamPath")
 
-	searchName, modelID, remainingPath, found := swaputil.FindModelInPath(s.cfg, "/"+upstreamPath)
+	searchName, modelID, remainingPath, found := swaputil.FindModelInPath(*s.Cfg(), "/"+upstreamPath)
 	if !found {
 		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
 		return
@@ -542,7 +542,7 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	// not already loaded, refuse the request without triggering a swap. The
 	// server was not able to process the response because the model was not
 	// already loaded.
-	for _, re := range s.cfg.Upstream.IgnorePaths {
+	for _, re := range s.Cfg().Upstream.IgnorePaths {
 		if !re.MatchString(remainingPath) {
 			continue
 		}

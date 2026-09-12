@@ -198,7 +198,7 @@ func TestServer_ResolveFilters_QualifiedPeer(t *testing.T) {
 		},
 	}}
 
-	useModelName, got, ok := resolveFilters(cfg, "remote/org/model")
+	useModelName, got, ok := resolveFilters(&cfg, "remote/org/model")
 	if !ok {
 		t.Fatal("qualified peer filters were not resolved")
 	}
@@ -249,7 +249,7 @@ func TestServer_FormFilterMiddleware(t *testing.T) {
 		gotFileBody = string(data)
 		gotContext, _ = swaputil.ReadContext(r.Context())
 	})
-	CreateFormFilterMiddleware(cfg)(final).ServeHTTP(httptest.NewRecorder(), r)
+	CreateFormFilterMiddleware(cfgAt(cfg))(final).ServeHTTP(httptest.NewRecorder(), r)
 
 	if gotModel != "whisper-large-v3" {
 		t.Errorf("model rewritten to %q, want whisper-large-v3", gotModel)

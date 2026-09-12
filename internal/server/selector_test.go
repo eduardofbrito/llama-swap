@@ -71,7 +71,7 @@ profiles:
 func selectorTestServer(t *testing.T, cfg config.Config, local *stubRouter) *Server {
 	t.Helper()
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = cfg
+	s.SetCfg(cfg)
 	s.routes()
 	t.Cleanup(func() { s.store.Close() })
 	return s

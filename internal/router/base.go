@@ -27,14 +27,33 @@ type unloadReq struct {
 	respond chan struct{}
 }
 
+// refreshModelReq asks the run loop to surgically replace one model's
+// process (and the router's view of its config) after a config edit,
+// without touching any other model.
+type refreshModelReq struct {
+	model   string
+	newCfg  config.Config
+	respond chan error
+}
+
 // baseRouter owns the channels, run-loop, and process machinery shared by every
 // concrete router. Concrete routers embed *baseRouter and supply a
 // scheduler.Swapper describing how eviction sets are decided. baseRouter
 // implements scheduler.Effects so the scheduler can call back for side-effects.
 type baseRouter struct {
-	name      string
-	config    config.Config
-	processes map[string]process.Process
+	name string
+	// config is the live config, read via configAt(). A surgical model
+	// refresh (RefreshModel) swaps it atomically on the run loop, so request
+	// paths — model lookup, websocket filtering, timeouts, manual-only —
+	// observe the new values without rebuilding the router.
+	config atomic.Pointer[config.Config]
+	// upstreamlog captures child process output for rebuilt processes during
+	// a surgical refresh.
+	upstreamlog *logmon.Monitor
+	// processes is the live model->process map, read via processesAt(). Like
+	// config it is swapped atomically (copy-on-write) by a refresh, so the
+	// map a running request captured stays consistent for its whole life.
+	processes atomic.Pointer[map[string]process.Process]
 	logger    *logmon.Monitor
 	schedule  scheduler.Scheduler
 
@@ -57,6 +76,7 @@ type baseRouter struct {
 	cancelCh    chan scheduler.HandlerReq
 	shutdownCh  chan shutdownReq
 	unloadCh    chan unloadReq
+	refreshCh   chan refreshModelReq
 	swapDoneCh  chan scheduler.SwapDone
 	serveDoneCh chan scheduler.ServeDoneEvent
 
@@ -79,10 +99,11 @@ func newBaseRouter(
 ) (*baseRouter, error) {
 	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
 	procCtx, procCancel := context.WithCancel(context.Background())
+	confPtr := &conf
 	b := &baseRouter{
 		name:        name,
-		config:      conf,
-		processes:   processes,
+		config:      atomic.Pointer[config.Config]{},
+		processes:   atomic.Pointer[map[string]process.Process]{},
 		logger:      logger,
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
@@ -92,16 +113,134 @@ func newBaseRouter(
 		cancelCh:    make(chan scheduler.HandlerReq),
 		shutdownCh:  make(chan shutdownReq),
 		unloadCh:    make(chan unloadReq),
+		refreshCh:   make(chan refreshModelReq),
 		swapDoneCh:  make(chan scheduler.SwapDone),
 		serveDoneCh: make(chan scheduler.ServeDoneEvent),
 		runDone:     make(chan struct{}),
 	}
+	b.config.Store(confPtr)
+	b.processes.Store(&processes)
 	sched, err := scheduler.New(conf, name, logger, planner, b)
 	if err != nil {
 		return nil, err
 	}
 	b.schedule = sched
 	return b, nil
+}
+
+// configAt returns the current live config. Readers hold a snapshot for the
+// duration of one operation; RefreshModel swaps the pointer atomically on the
+// run loop, so a concurrent refresh simply takes effect from the next read.
+func (b *baseRouter) configAt() config.Config {
+	return *b.config.Load()
+}
+
+// processesAt returns a snapshot of the model->process map. The map itself is
+// never mutated after construction: a refresh builds a new map and swaps the
+// pointer, so a request that captured a map mid-flight keeps a consistent
+// view for its whole life.
+func (b *baseRouter) processesAt() map[string]process.Process {
+	return *b.processes.Load()
+}
+
+// swapProcess atomically publishes a new model->process map. Called on the
+// run loop only; callers build the map from the current snapshot.
+func (b *baseRouter) swapProcess(next map[string]process.Process) {
+	b.processes.Store(&next)
+}
+
+// RefreshModel surgically replaces one model's process (and the router's view
+// of its config) after a single-model config edit, without touching any other
+// model's running process. It is funneled through the run loop so the swap is
+// serialized with swaps/unloads. newCfg is the freshly loaded full config; the
+// caller is responsible for ensuring only this model's block changed (the
+// eviction planner holds the old config, which is still valid when the group/
+// matrix structure is unchanged).
+//
+// If the model was serving (StateReady) before the refresh, the rebuilt
+// process is restarted in the background.
+func (b *baseRouter) RefreshModel(model string, newCfg config.Config) error {
+	req := refreshModelReq{model: model, newCfg: newCfg, respond: make(chan error, 1)}
+	select {
+	case b.refreshCh <- req:
+	case <-b.runDone:
+		return fmt.Errorf("%s: router is shutting down", b.name)
+	}
+	select {
+	case err := <-req.respond:
+		return err
+	case <-b.runDone:
+		return fmt.Errorf("%s: router is shutting down", b.name)
+	}
+}
+
+// handleRefreshModel is the run-loop body of RefreshModel.
+func (b *baseRouter) handleRefreshModel(req refreshModelReq) error {
+	model := req.model
+	newCfg := req.newCfg
+
+	// 1) Build the replacement process FIRST, so a build failure leaves the
+	//    router completely untouched (old config, old process, still serving).
+	procs := b.processesAt()
+	old, hadOld := procs[model]
+	wasReady := hadOld && old.State() == process.StateReady
+	mc, exists := newCfg.Models[model]
+
+	next := make(map[string]process.Process, len(procs))
+	for id, p := range procs {
+		next[id] = p
+	}
+	var newProc process.Process
+	if exists {
+		procLog := logmon.NewWriter(b.upstreamlog)
+		np, err := process.New(b.procCtx, model, mc, procLog, b.logger)
+		if err != nil {
+			return fmt.Errorf("creating process for %q: %w", model, err)
+		}
+		newProc = np
+		next[model] = np
+	} else {
+		// Model removed from the config: drop it from the map.
+		delete(next, model)
+	}
+
+	// 2) Commit: publish the new config atomically (model lookup,
+	//    manual-only, websocket filtering, and timeouts now observe the new
+	//    values), drop this model's waiters/queued requests from the scheduler
+	//    (nothing may keep the about-to-be-stopped process) and resync its
+	//    per-model concurrency limit.
+	b.config.Store(&newCfg)
+	b.schedule.OnModelReload(model)
+	b.schedule.UpdateModel(model, mc, !exists)
+
+	// 3) Stop the old process, then publish the new map. In-flight requests
+	//    being served by the old process are killed the same way an Unload
+	//    kills them (their callers see an error and may retry).
+	if hadOld {
+		if stopErr := old.Stop(b.unloadTimeout(model)); stopErr != nil {
+			b.logger.Warnf("%s: stopping %s during refresh failed: %v", b.name, model, stopErr)
+		}
+	}
+	b.swapProcess(next)
+
+	// 4) If the model was serving, restart the rebuilt process in the
+	//    background. The scheduler does not need a swap-done report: it is
+	//    not the scheduler that initiated this start, and it re-observes the
+	//    process state on the next request.
+	if exists && wasReady {
+		np := newProc
+		go func() {
+			timeout := b.healthCheckTimeout()
+			if opt, ok := np.(process.ProcessWithOptions); ok {
+				_ = opt.EnsureReadyWithOptions(b.shutdownCtx, timeout, process.Options{})
+			} else {
+				_ = np.EnsureReady(b.shutdownCtx, timeout)
+			}
+		}()
+	}
+
+	b.logger.Infof("%s: refreshed model %s (wasReady=%v, exists=%v)", b.name, model, wasReady, exists)
+	return nil
 }
 
 func (b *baseRouter) notifyProcessed() {
@@ -130,6 +269,10 @@ func (b *baseRouter) run() {
 		case req := <-b.unloadCh:
 			b.schedule.OnUnload(req.targets, req.timeout)
 			close(req.respond)
+			b.notifyProcessed()
+
+		case req := <-b.refreshCh:
+			req.respond <- b.handleRefreshModel(req)
 			b.notifyProcessed()
 
 		case ev := <-b.swapDoneCh:
@@ -168,7 +311,7 @@ func (b *baseRouter) grant(req scheduler.HandlerReq, resp scheduler.HandlerResp)
 
 // ModelState implements scheduler.Effects.
 func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
-	p, ok := b.processes[modelID]
+	p, ok := b.processesAt()[modelID]
 	if !ok {
 		var zero process.ProcessState
 		return zero, false
@@ -178,7 +321,7 @@ func (b *baseRouter) ModelState(modelID string) (process.ProcessState, bool) {
 
 // ModelManual implements scheduler.Effects.
 func (b *baseRouter) ModelManual(modelID string) (bool, bool) {
-	mc, ok := b.config.Models[modelID]
+	mc, ok := b.configAt().Models[modelID]
 	return ok && mc.ManualOnly, ok
 }
 
@@ -200,7 +343,7 @@ func (b *baseRouter) GrantError(req scheduler.HandlerReq, err error) {
 // decrement will ever arrive — incrementing would strand the counter at >0 and
 // the router would never again be willing to evict this model.
 func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
-	p := b.processes[modelID]
+	p := b.processesAt()[modelID]
 	return b.grant(req, scheduler.HandlerResp{HandleFunc: b.trackedServe(modelID, p)})
 }
 
@@ -209,7 +352,7 @@ func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
 func (b *baseRouter) StopProcesses(timeout time.Duration, ids []string) {
 	var wg sync.WaitGroup
 	for _, id := range ids {
-		p, ok := b.processes[id]
+		p, ok := b.processesAt()[id]
 		if !ok {
 			continue
 		}
@@ -257,7 +400,7 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 			if err := p.Stop(timeout); err != nil {
 				b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
 			}
-		}(b.processes[mID], mID)
+		}(b.processesAt()[mID], mID)
 	}
 	wg.Wait()
 
@@ -271,7 +414,7 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 	// The WithOptions variant applies any per-load options (a GPU override);
 	// it falls back to the plain EnsureReady when a process does not implement
 	// optional options, so the behaviour is identical to before in that case.
-	target := b.processes[modelID]
+	target := b.processesAt()[modelID]
 	var err error
 	if opt, ok := target.(process.ProcessWithOptions); ok {
 		err = opt.EnsureReadyWithOptions(b.shutdownCtx, timeout, opts)
@@ -310,7 +453,7 @@ func (b *baseRouter) handleShutdown(req shutdownReq) {
 	}
 
 	var wg sync.WaitGroup
-	for i, p := range b.processes {
+	for i, p := range b.processesAt() {
 		wg.Add(1)
 		go func(id string, p process.Process) {
 			defer wg.Done()
@@ -345,7 +488,7 @@ func (b *baseRouter) handleShutdown(req shutdownReq) {
 }
 
 func (b *baseRouter) healthCheckTimeout() time.Duration {
-	t := time.Duration(b.config.HealthCheckTimeout) * time.Second
+	t := time.Duration(b.configAt().HealthCheckTimeout) * time.Second
 	if t <= 0 {
 		return 30 * time.Second
 	}
@@ -357,19 +500,20 @@ func (b *baseRouter) healthCheckTimeout() time.Duration {
 // model value is rewritten to the global default on parse), so no zero handling
 // is needed here.
 func (b *baseRouter) unloadTimeout(modelID string) time.Duration {
-	if mc, ok := b.config.Models[modelID]; ok {
+	cfg := b.configAt()
+	if mc, ok := cfg.Models[modelID]; ok {
 		return time.Duration(mc.UnloadTimeout) * time.Second
 	}
-	return time.Duration(b.config.UnloadTimeout) * time.Second
+	return time.Duration(cfg.UnloadTimeout) * time.Second
 }
 
 func (b *baseRouter) Handles(model string) bool {
-	_, ok := b.processes[model]
+	_, ok := b.processesAt()[model]
 	return ok
 }
 
 func (b *baseRouter) ProcessLogger(modelID string) (*logmon.Monitor, bool) {
-	if p, ok := b.processes[modelID]; ok {
+	if p, ok := b.processesAt()[modelID]; ok {
 		return p.Logger(), true
 	}
 	return nil, false
@@ -380,7 +524,7 @@ func (b *baseRouter) ProcessLogger(modelID string) (*logmon.Monitor, bool) {
 // is a snapshot, so this is safe to call without the run loop.
 func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 	running := make(map[string]process.ProcessState)
-	for id, p := range b.processes {
+	for id, p := range b.processesAt() {
 		st := p.State()
 		if st == process.StateStopped || st == process.StateShutdown {
 			continue
@@ -393,7 +537,7 @@ func (b *baseRouter) RunningModels() map[string]process.ProcessState {
 // ProcessGPU reports the GPU a named model is loaded onto. Processes are
 // asked only while running; a stopped process reports "" by construction.
 func (b *baseRouter) ProcessGPU(modelID string) string {
-	p, ok := b.processes[modelID]
+	p, ok := b.processesAt()[modelID]
 	if !ok {
 		return ""
 	}
@@ -429,8 +573,9 @@ func (b *baseRouter) ProcessGPU(modelID string) string {
 func (b *baseRouter) Unload(timeout time.Duration, models ...string) {
 	targets := models
 	if len(targets) == 0 {
-		targets = make([]string, 0, len(b.processes))
-		for id := range b.processes {
+		procs := b.processesAt()
+		targets = make([]string, 0, len(procs))
+		for id := range procs {
 			targets = append(targets, id)
 		}
 	}
@@ -488,7 +633,7 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	data, err := swaputil.FetchContext(req, b.config)
+	data, err := swaputil.FetchContext(req, b.configAt())
 	if err != nil {
 		swaputil.SendError(w, req, err)
 		return
@@ -496,11 +641,11 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Ignored websocket connections are deliberately kept outside the
 	// scheduler: they cannot start or queue a model, consume concurrency, or
-	// prevent another request from swapping the process out. A process may stop
+	// prevent another model from swapping the process out. A process may stop
 	// immediately after this readiness check; dropping that websocket is the
 	// intended tradeoff of opting out of lifecycle tracking.
-	if swaputil.ShouldIgnoreWebsocket(req, b.config) {
-		p, ok := b.processes[data.ModelID]
+	if swaputil.ShouldIgnoreWebsocket(req, b.configAt()) {
+		p, ok := b.processesAt()[data.ModelID]
 		if !ok {
 			swaputil.SendError(w, req, scheduler.ErrModelNotFound)
 			return
@@ -560,7 +705,7 @@ func (b *baseRouter) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	isModelReady := false
-	if p, ok := b.processes[data.ModelID]; ok {
+	if p, ok := b.processesAt()[data.ModelID]; ok {
 		isModelReady = p.State() == process.StateReady
 	}
 	shouldShowLoading := data.Streaming && data.SendLoadingState && isLoadingPath(req.URL.Path) && !isModelReady

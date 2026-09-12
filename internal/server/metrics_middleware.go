@@ -7,14 +7,13 @@ import (
 	"strings"
 
 	"github.com/mostlygeek/llama-swap/internal/chain"
-	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 // CreateMetricsMiddleware returns middleware that records token metrics for
 // model-dispatched POST requests. It resolves the model, tees the response into
 // a buffer, and parses token usage once the upstream handler returns.
-func CreateMetricsMiddleware(mm *metricsMonitor, cfg config.Config) chain.Middleware {
+func CreateMetricsMiddleware(mm *metricsMonitor, cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if mm == nil || r.Method != http.MethodPost {
@@ -22,13 +21,15 @@ func CreateMetricsMiddleware(mm *metricsMonitor, cfg config.Config) chain.Middle
 				return
 			}
 
+			live := cfg()
+
 			// Determine the model-routed endpoint path. Regular routes are
 			// already meterable; /upstream/<model>/<path> is metered only when
 			// the remaining path matches a model-dispatched endpoint.
 			checkPath := r.URL.Path
 			if strings.HasPrefix(r.URL.Path, "/upstream/") {
 				var found bool
-				_, _, checkPath, found = swaputil.FindModelInPath(cfg, strings.TrimPrefix(r.URL.Path, "/upstream"))
+				_, _, checkPath, found = swaputil.FindModelInPath(*live, strings.TrimPrefix(r.URL.Path, "/upstream"))
 				if !found {
 					next.ServeHTTP(w, r)
 					return
@@ -43,7 +44,7 @@ func CreateMetricsMiddleware(mm *metricsMonitor, cfg config.Config) chain.Middle
 			// Resolve the model now so downstream dispatch hits the context
 			// fast path; FetchContext restores the request body for regular
 			// routes and extracts the model from the URL for /upstream routes.
-			data, err := swaputil.FetchContext(r, cfg)
+			data, err := swaputil.FetchContext(r, *live)
 			if err != nil {
 				swaputil.SendError(w, r, swaputil.ErrNoModelInContext)
 				return

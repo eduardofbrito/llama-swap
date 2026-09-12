@@ -21,7 +21,7 @@ import (
 
 func TestServer_InflightMiddleware_AddsAndRemovesEntriesAroundRequestHandling(t *testing.T) {
 	tracker := newInflightTracker()
-	mw := CreateInflightMiddleware(tracker, config.Config{})
+	mw := CreateInflightMiddleware(tracker, cfgAt(config.Config{}))
 
 	var duringRequest swaputil.InFlightRequestsEvent
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +75,7 @@ func TestServer_InflightMiddleware_IgnoresConfiguredWebsocket(t *testing.T) {
 		"m1": {Compat: config.CompatConfig{IgnoreWebsockets: true}},
 	}}
 	var duringRequest swaputil.InFlightRequestsEvent
-	handler := CreateInflightMiddleware(tracker, cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := CreateInflightMiddleware(tracker, cfgAt(cfg))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		duringRequest = tracker.Current()
 		w.WriteHeader(http.StatusSwitchingProtocols)
 	}))
@@ -99,7 +99,7 @@ func TestServer_InflightMiddleware_StreamsResponseUpdates(t *testing.T) {
 
 	release := make(chan struct{})
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := CreateInflightMiddleware(tracker, cfgAt(config.Config{}))(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Set-Cookie", "secret=value")
 		w.WriteHeader(http.StatusOK)
@@ -149,7 +149,7 @@ func TestServer_InflightEventPayloadIncludesRequestEntries(t *testing.T) {
 
 	release := make(chan struct{})
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := CreateInflightMiddleware(tracker, cfgAt(config.Config{}))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 	}))
 
@@ -231,7 +231,7 @@ func TestServer_InflightCancelByIDCancelsRequestContext(t *testing.T) {
 	tracker := newInflightTracker()
 	idCh := make(chan string, 1)
 	done := make(chan struct{})
-	handler := CreateInflightMiddleware(tracker, config.Config{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := CreateInflightMiddleware(tracker, cfgAt(config.Config{}))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		current := tracker.Current()
 		if len(current.Requests) != 1 {
 			t.Errorf("inflight requests = %d, want 1", len(current.Requests))
@@ -562,7 +562,7 @@ func TestServer_APICancelInflight(t *testing.T) {
 func TestServer_InflightMetricsRecordsCompletedOnce(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, `{"usage":{"prompt_tokens":1,"completion_tokens":2}}`)
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = configWithModels("m1")
+	s.SetCfg(configWithModels("m1"))
 
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, chatRequest("m1"))
@@ -603,10 +603,10 @@ func TestServer_APIPerformance_Unavailable(t *testing.T) {
 func TestServer_ModelStatus_IncludesDefaultGpu(t *testing.T) {
 	local := newStubRouter(nil, "")
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = config.Config{Models: map[string]config.ModelConfig{
+	s.SetCfg(config.Config{Models: map[string]config.ModelConfig{
 		"pinned":   {Env: []string{"CUDA_VISIBLE_DEVICES=3"}},
 		"unpinned": {},
-	}}
+	}})
 
 	got := s.modelStatus()
 	if len(got) != 2 {
@@ -645,7 +645,7 @@ func TestServer_ModelStatus_IncludesDefaultGpu(t *testing.T) {
 
 func TestServer_APIEvents_InitialPayload(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
-	s.cfg.UI.Activity.SessionID = []string{"X-Trace-ID"}
+	s.Cfg().UI.Activity.SessionID = []string{"X-Trace-ID"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)

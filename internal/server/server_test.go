@@ -35,6 +35,8 @@ type stubRouter struct {
 	unloadTimeout time.Duration
 	loggers       map[string]*logmon.Monitor
 	gpuFor        map[string]string
+	refreshModels []string
+	refreshErr    error
 }
 
 func newStubRouter(models []string, response string) *stubRouter {
@@ -78,6 +80,10 @@ func (s *stubRouter) ProcessLogger(modelID string) (*logmon.Monitor, bool) {
 	}
 	return nil, false
 }
+func (s *stubRouter) RefreshModel(modelID string, _ config.Config) error {
+	s.refreshModels = append(s.refreshModels, modelID)
+	return s.refreshErr
+}
 
 // newTestServer wires a Server with stub routers and a built mux.
 func newTestServer(local router.LocalRouter, peer router.Router) *Server {
@@ -94,7 +100,6 @@ func newTestServerWithConfig(cfg config.Config, local router.LocalRouter, peer r
 		panic(err)
 	}
 	s := &Server{
-		cfg:         cfg,
 		muxlog:      logmon.NewWriter(io.Discard),
 		proxylog:    proxylog,
 		upstreamlog: logmon.NewWriter(io.Discard),
@@ -106,6 +111,7 @@ func newTestServerWithConfig(cfg config.Config, local router.LocalRouter, peer r
 		shutdownCtx: ctx,
 		shutdownFn:  cancel,
 	}
+	s.cfg.Store(&cfg)
 	s.routes()
 	return s
 }
@@ -120,7 +126,7 @@ func newTestServerWithReference(local router.LocalRouter, peer router.Router, fs
 	registry, err := mcptools.New(
 		docagent.NewDocsProvider(s.reference),
 		mcptools.NewSysProvider(func() time.Time { return testClock }),
-		config.NewConfigProvider(s.cfg),
+		config.NewConfigProvider(*s.Cfg()),
 	)
 	if err != nil {
 		panic(err)
@@ -131,6 +137,11 @@ func newTestServerWithReference(local router.LocalRouter, peer router.Router, fs
 
 // testClock is the fixed instant SysProvider reports in tests.
 var testClock = time.Date(2026, 3, 14, 15, 9, 26, 0, time.UTC)
+
+// cfgAt adapts a value config to the live-config accessor middleware expect.
+func cfgAt(c config.Config) ConfigAt {
+	return func() *config.Config { return &c }
+}
 
 func newTestMetricsMonitor(t *testing.T, logger *logmon.Monitor, maxMetrics int, captureBufferMB int) *metricsMonitor {
 	t.Helper()
@@ -438,7 +449,7 @@ func TestServer_Running(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "")
 	local.running = map[string]process.ProcessState{"m1": process.StateReady}
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = config.Config{Models: map[string]config.ModelConfig{
+	s.SetCfg(config.Config{Models: map[string]config.ModelConfig{
 		"m1": {
 			Cmd:         "llama-server",
 			Proxy:       "http://localhost:9999",
@@ -446,7 +457,7 @@ func TestServer_Running(t *testing.T) {
 			Name:        "Model One",
 			Description: "the first model",
 		},
-	}}
+	}})
 
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/running", nil))
@@ -481,9 +492,9 @@ func TestServer_Running(t *testing.T) {
 func TestServer_Preload(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "ok")
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = config.Config{Hooks: config.HooksConfig{
+	s.SetCfg(config.Config{Hooks: config.HooksConfig{
 		OnStartup: config.HookOnStartup{Preload: []string{"m1"}},
-	}}
+	}})
 
 	got := make(chan swaputil.ModelPreloadedEvent, 1)
 	cancel := event.On(func(e swaputil.ModelPreloadedEvent) { got <- e })
@@ -553,7 +564,7 @@ func TestServer_LogStream_ModelID(t *testing.T) {
 	local.loggers = map[string]*logmon.Monitor{"mymodel": buf}
 
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = config.Config{Models: map[string]config.ModelConfig{"mymodel": {}}}
+	s.SetCfg(config.Config{Models: map[string]config.ModelConfig{"mymodel": {}}})
 
 	// Pre-cancel the context so the streaming loop exits immediately after
 	// flushing history.

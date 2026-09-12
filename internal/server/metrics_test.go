@@ -308,7 +308,7 @@ func TestServer_MetricsMiddleware_ClientClosed(t *testing.T) {
 	proxylog := logmon.NewWriter(io.Discard)
 	handler := chain.New(
 		CreateRequestLogMiddleware(proxylog),
-		CreateMetricsMiddleware(mm, cfg),
+		CreateMetricsMiddleware(mm, cfgAt(cfg)),
 	).ThenFunc(func(w http.ResponseWriter, r *http.Request) {})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -346,7 +346,7 @@ func TestServer_MetricsMiddleware_ServerSideCancelIsNotClientClosed(t *testing.T
 	// answers the still-connected client, as the proxy ErrorHandler does.
 	handler := chain.New(
 		CreateRequestLogMiddleware(proxylog),
-		CreateMetricsMiddleware(mm, cfg),
+		CreateMetricsMiddleware(mm, cfgAt(cfg)),
 	).ThenFunc(func(w http.ResponseWriter, r *http.Request) {
 		derived, cancel := context.WithCancel(r.Context())
 		defer cancel()
@@ -576,7 +576,7 @@ func TestServer_MetricsMiddleware_UpstreamAudioCaptureSkipsRespBody(t *testing.T
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("BINARY-AUDIO-DATA"))
 	})
-	handler := CreateMetricsMiddleware(mm, cfg)(inner)
+	handler := CreateMetricsMiddleware(mm, cfgAt(cfg))(inner)
 
 	req := httptest.NewRequest(http.MethodPost, "/upstream/m1/v1/audio/speech", strings.NewReader(`{"model":"m1"}`))
 	handler.ServeHTTP(httptest.NewRecorder(), req)

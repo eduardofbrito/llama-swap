@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mostlygeek/llama-swap/internal/chain"
-	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/event"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
@@ -374,10 +373,10 @@ func (w *inflightResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 // CreateInflightMiddleware returns middleware that tracks model-dispatched
 // requests until downstream handling completes.
-func CreateInflightMiddleware(t *inflightTracker, cfg config.Config) chain.Middleware {
+func CreateInflightMiddleware(t *inflightTracker, cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if swaputil.ShouldIgnoreWebsocket(r, cfg) {
+			if swaputil.ShouldIgnoreWebsocket(r, *cfg()) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -397,7 +396,7 @@ func CreateInflightMiddleware(t *inflightTracker, cfg config.Config) chain.Middl
 // CreateUpstreamInflightMiddleware tracks /upstream/<model>/<path> requests
 // only when the stripped upstream path is one of the model-dispatched
 // inference endpoints.
-func CreateUpstreamInflightMiddleware(t *inflightTracker, cfg config.Config) chain.Middleware {
+func CreateUpstreamInflightMiddleware(t *inflightTracker, cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.HasPrefix(r.URL.Path, "/upstream/") {
@@ -406,17 +405,18 @@ func CreateUpstreamInflightMiddleware(t *inflightTracker, cfg config.Config) cha
 			}
 			r = markInflightStart(r)
 
-			_, _, remainingPath, found := swaputil.FindModelInPath(cfg, strings.TrimPrefix(r.URL.Path, "/upstream"))
+			live := cfg()
+			_, _, remainingPath, found := swaputil.FindModelInPath(*live, strings.TrimPrefix(r.URL.Path, "/upstream"))
 			if !found || !isModelDispatchedRequest(r.Method, remainingPath) {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			if _, err := swaputil.FetchContext(r, cfg); err != nil {
+			if _, err := swaputil.FetchContext(r, *live); err != nil {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if swaputil.ShouldIgnoreWebsocket(r, cfg) {
+			if swaputil.ShouldIgnoreWebsocket(r, *live) {
 				next.ServeHTTP(w, r)
 				return
 			}

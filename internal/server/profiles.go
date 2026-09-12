@@ -13,7 +13,7 @@ import (
 func CreateProfileMiddleware(s *Server) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			profile, ok := s.cfg.Profiles[s.ActiveProfile()]
+			profile, ok := s.Cfg().Profiles[s.ActiveProfile()]
 			if ok {
 				var model, replacement string
 				var pinned bool

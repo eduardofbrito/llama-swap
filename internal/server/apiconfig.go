@@ -104,16 +104,48 @@ func (s *Server) handleAPIAddModel(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIReloadConfig triggers a hot reload so UI edits take effect
 // without restarting the process.
-// POST /api/config/reload
+//
+// POST /api/config/reload          full reload (rebuilds the server; drops
+//
+//	every running model)
+//
+// POST /api/config/reload?model=m  surgical reload: only model m's config and
+//
+//	process are rebuilt, every other model
+//	keeps serving. Falls back to a full
+//	reload when the diff is not model-only
+//	(group/matrix/selector/profile/global
+//	changes) or the surgical refresh fails.
 func (s *Server) handleAPIReloadConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.requireConfigFile(w, r) {
+		return
+	}
+	model := r.URL.Query().Get("model")
+	if model == "" {
+		if s.reloadFn == nil {
+			swaputil.SendResponse(w, r, http.StatusNotImplemented, "config reload is not wired on this instance")
+			return
+		}
+		go s.reloadFn()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"msg": "reload triggered"})
 		return
 	}
 	if s.reloadFn == nil {
 		swaputil.SendResponse(w, r, http.StatusNotImplemented, "config reload is not wired on this instance")
 		return
 	}
-	go s.reloadFn()
+	if err := s.SurgicalReload(model); err != nil {
+		// Not a model-only edit (selectors/profiles/global) or the refresh
+		// failed: fall back to the full reload so the edited config still
+		// takes effect. The file on disk was already updated by the PUT.
+		s.proxylog.Warnf("config: surgical reload of %s not possible (%v); falling back to full reload", model, err)
+		go s.reloadFn()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"msg": "reload triggered", "model": model, "scope": "full"})
+		return
+	}
+	s.proxylog.Infof("config: model %s reloaded surgically (other models untouched)", model)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"msg": "reload triggered"})
+	json.NewEncoder(w).Encode(map[string]string{"msg": "reloaded", "model": model, "scope": "model"})
 }

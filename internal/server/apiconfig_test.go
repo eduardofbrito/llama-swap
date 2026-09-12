@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mostlygeek/llama-swap/internal/config"
 )
 
 func writeTestConfigFile(t *testing.T, content string) string {
@@ -125,6 +127,96 @@ func TestServer_ConfigEndpoints_AddModel(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("missing id status = %d, want 400", w.Code)
 	}
+}
+
+func TestServer_ConfigEndpoints_Reload_Surgical(t *testing.T) {
+	// Live config must mirror the file BEFORE the edit, so the only delta the
+	// reload sees is alpha's proxy. That delta is model-only -> surgical path.
+	live, err := config.LoadConfigFromReader(strings.NewReader(apiconfigTestConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := newStubRouter([]string{"alpha"}, "ok")
+	fullReloads := make(chan struct{}, 1)
+	path := writeTestConfigFile(t, apiconfigTestConfig)
+	s := newTestServerWithConfig(live, local, newStubRouter(nil, ""))
+	s.WithConfigEdit(path, func() { fullReloads <- struct{}{} })
+	s.WithConfigDir("")
+
+	// Edit alpha's proxy in the file, exactly as the Conf tab's PUT would.
+	edited := `{"yaml":"proxy: http://127.0.0.1:22435\n"}`
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/config/model/alpha", strings.NewReader(edited)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("surgical reload status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"scope":"model"`) {
+		t.Errorf("expected scope=model, got %s", w.Body.String())
+	}
+	if len(local.refreshModels) != 1 || local.refreshModels[0] != "alpha" {
+		t.Errorf("refreshModels = %v, want [alpha]", local.refreshModels)
+	}
+	if !strings.Contains(string(mustRead(t, path)), "22435") {
+		t.Error("config file not updated before reload")
+	}
+	// The live config snapshot must carry the new value.
+	if got := s.Cfg().Models["alpha"].Proxy; got != "http://127.0.0.1:22435" {
+		t.Errorf("live cfg alpha.proxy = %q, want the edited value", got)
+	}
+	select {
+	case <-fullReloads:
+		t.Error("full reload callback fired for a model-only edit")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestServer_ConfigEndpoints_Reload_SurgicalFallback(t *testing.T) {
+	// A global key (globalConcurrencyLimit) differs between the live config and
+	// the file -> the diff is not model-only -> fall back to the full reload.
+	liveYAML := apiconfigTestConfig // no globalConcurrencyLimit
+	fileYAML := apiconfigTestConfig + "globalConcurrencyLimit: 5\n"
+	live, err := config.LoadConfigFromReader(strings.NewReader(liveYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	local := newStubRouter([]string{"alpha"}, "ok")
+	fullReloads := make(chan struct{}, 1)
+	path := writeTestConfigFile(t, fileYAML)
+	s := newTestServerWithConfig(live, local, newStubRouter(nil, ""))
+	s.WithConfigEdit(path, func() { fullReloads <- struct{}{} })
+	s.WithConfigDir("")
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/config/reload?model=alpha", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"scope":"full"`) {
+		t.Errorf("expected scope=full fallback, got %s", w.Body.String())
+	}
+	if len(local.refreshModels) != 0 {
+		t.Errorf("refreshModels = %v, want none (full reload path)", local.refreshModels)
+	}
+	select {
+	case <-fullReloads:
+	case <-time.After(2 * time.Second):
+		t.Error("full reload callback was not invoked on fallback")
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return data
 }
 
 func TestServer_ConfigEndpoints_Reload(t *testing.T) {

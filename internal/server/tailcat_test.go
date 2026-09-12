@@ -27,7 +27,7 @@ tailcat:
 	}
 	cfg.SetTailcatEnabled(true)
 	s := newTestServer(newStubRouter([]string{"real", "hidden"}, "ok"), newStubRouter(nil, ""))
-	s.cfg = cfg
+	s.SetCfg(cfg)
 	s.routes()
 	return s
 }
@@ -125,7 +125,7 @@ func TestServer_TailcatFiltersModelListing(t *testing.T) {
 
 func TestServer_TailcatAdminUnlocksNormalSurface(t *testing.T) {
 	s := newTailcatPolicyServer(t, "")
-	s.cfg.Tailcat.Admin = true
+	s.Cfg().Tailcat.Admin = true
 	w := httptest.NewRecorder()
 	s.ServeTailcatHTTP(w, tailcatRequest(http.MethodGet, "/api/version", ""))
 	if w.Code != http.StatusOK {
@@ -147,7 +147,7 @@ profiles:
     pins:
       prod-only: real
 `)
-	s.cfg.Tailcat.Models = []string{"*"}
+	s.Cfg().Tailcat.Models = []string{"*"}
 
 	if got := s.tailcatExposedModelIDs(); contains(got, "dev-only") || contains(got, "prod-only") {
 		t.Fatalf("no active profile: got %v, want neither profile's pins listed", got)
@@ -182,7 +182,7 @@ func TestServer_APITailcatStatus(t *testing.T) {
 		t.Fatalf("status response = %d %q", w.Code, w.Body.String())
 	}
 
-	s.cfg.SetTailcatEnabled(false)
+	s.Cfg().SetTailcatEnabled(false)
 	w = httptest.NewRecorder()
 	s.ServeHTTP(w, tailcatRequest(http.MethodGet, "/api/tailcat", ""))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"enabled":false`) ||

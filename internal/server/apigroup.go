@@ -53,15 +53,15 @@ func nullableProfile(name string) any {
 }
 
 func (s *Server) handleAPIProfiles(w http.ResponseWriter, r *http.Request) {
-	ids := make([]string, 0, len(s.cfg.Profiles))
-	for id := range s.cfg.Profiles {
+	ids := make([]string, 0, len(s.Cfg().Profiles))
+	for id := range s.Cfg().Profiles {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
 	profiles := make([]apiProfile, 0, len(ids))
 	for _, id := range ids {
-		profile := s.cfg.Profiles[id]
+		profile := s.Cfg().Profiles[id]
 		profiles = append(profiles, apiProfile{
 			ID:          id,
 			Description: profile.Description,
@@ -108,15 +108,15 @@ func (s *Server) handleAPIActiveProfile(w http.ResponseWriter, r *http.Request) 
 func (s *Server) modelStatus() []apiModel {
 	running := s.local.RunningModels()
 
-	ids := make([]string, 0, len(s.cfg.Models))
-	for id := range s.cfg.Models {
+	ids := make([]string, 0, len(s.Cfg().Models))
+	for id := range s.Cfg().Models {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
 	models := make([]apiModel, 0, len(ids))
 	for _, id := range ids {
-		mc := s.cfg.Models[id]
+		mc := s.Cfg().Models[id]
 		state := "stopped"
 		gpu := ""
 		if st, ok := running[id]; ok {
@@ -141,7 +141,7 @@ func (s *Server) modelStatus() []apiModel {
 		})
 	}
 
-	for peerID, peer := range s.cfg.Peers {
+	for peerID, peer := range s.Cfg().Peers {
 		for _, modelID := range peer.Models {
 			models = append(models, apiModel{Id: config.PeerModelFQN(peerID, modelID), PeerID: peerID})
 		}
@@ -160,7 +160,7 @@ func (s *Server) handleAPIUnloadAll(w http.ResponseWriter, r *http.Request) {
 // handleAPIUnloadModel stops a single named local process.
 func (s *Server) handleAPIUnloadModel(w http.ResponseWriter, r *http.Request) {
 	requested := strings.TrimPrefix(r.PathValue("model"), "/")
-	realName, found := s.cfg.RealModelName(requested)
+	realName, found := s.Cfg().RealModelName(requested)
 	if !found {
 		swaputil.SendResponse(w, r, http.StatusNotFound, "model not found")
 		return
@@ -378,7 +378,7 @@ func (s *Server) handleAPIVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPITailcat(w http.ResponseWriter, r *http.Request) {
 	address := ""
 	models := []string{}
-	enabled := s.cfg.TailcatEnabled()
+	enabled := s.Cfg().TailcatEnabled()
 	if enabled {
 		address = s.TailcatAddress()
 		if ids := s.tailcatExposedModelIDs(); ids != nil {
@@ -396,31 +396,31 @@ func (s *Server) handleAPITailcat(w http.ResponseWriter, r *http.Request) {
 // models addressed either by their fully qualified name or, where
 // unambiguous, their bare name. A "*" entry expands to every candidate.
 func (s *Server) tailcatExposedModelIDs() []string {
-	tc := s.cfg.Tailcat
+	tc := s.Cfg().Tailcat
 	if tc == nil {
 		return nil
 	}
 
 	candidates := make(map[string]struct{})
-	for id, mc := range s.cfg.Models {
+	for id, mc := range s.Cfg().Models {
 		candidates[id] = struct{}{}
 		for _, alias := range mc.Aliases {
 			candidates[alias] = struct{}{}
 		}
 	}
-	for selectorID := range s.cfg.Selectors {
+	for selectorID := range s.Cfg().Selectors {
 		candidates[selectorID] = struct{}{}
 	}
-	for peerID, peer := range s.cfg.Peers {
+	for peerID, peer := range s.Cfg().Peers {
 		for _, modelID := range peer.Models {
 			candidates[config.PeerModelFQN(peerID, modelID)] = struct{}{}
-			if resolvedPeer, resolvedModel, found := s.cfg.ResolvePeerModel(modelID); found &&
+			if resolvedPeer, resolvedModel, found := s.Cfg().ResolvePeerModel(modelID); found &&
 				resolvedPeer == peerID && resolvedModel == modelID {
 				candidates[modelID] = struct{}{}
 			}
 		}
 	}
-	if profile, ok := s.cfg.Profiles[s.ActiveProfile()]; ok {
+	if profile, ok := s.Cfg().Profiles[s.ActiveProfile()]; ok {
 		for pin, target := range profile.Pins {
 			if target != "" {
 				candidates[pin] = struct{}{}
@@ -649,7 +649,7 @@ func (s *Server) handleAPIEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sendUIConfig := func() {
-		if j, err := json.Marshal(s.cfg.UI); err == nil {
+		if j, err := json.Marshal(s.Cfg().UI); err == nil {
 			send(messageEnvelope{Type: msgTypeUIConfig, Data: string(j)})
 		}
 	}

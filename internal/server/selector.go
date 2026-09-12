@@ -90,10 +90,10 @@ func (t *selectorSpilloverTracker) release(selectorID, target string) {
 // CreateSelectorMiddleware resolves selector model IDs after profile rewrites
 // and before the normal request context, filters, routing, and metrics pipeline.
 func CreateSelectorMiddleware(s *Server) chain.Middleware {
-	spillovers := newSelectorSpilloverTracker(s.cfg)
+	spillovers := newSelectorSpilloverTracker(*s.Cfg())
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if len(s.cfg.Selectors) == 0 {
+			if len(s.Cfg().Selectors) == 0 {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -103,7 +103,7 @@ func CreateSelectorMiddleware(s *Server) chain.Middleware {
 				next.ServeHTTP(w, r)
 				return
 			}
-			selector, found := s.cfg.Selectors[model]
+			selector, found := s.Cfg().Selectors[model]
 			if !found {
 				next.ServeHTTP(w, r)
 				return
@@ -114,7 +114,7 @@ func CreateSelectorMiddleware(s *Server) chain.Middleware {
 			case config.SelectorStrategyPin:
 				target, err = strategyPin(selector)
 			case config.SelectorStrategyWarm:
-				target, err = strategyWarm(s.cfg, selector, s.local.RunningModels())
+				target, err = strategyWarm(*s.Cfg(), selector, s.local.RunningModels())
 			case config.SelectorStrategySpillover:
 				target, err = strategySpillover(model, spillovers, s.local.RunningModels())
 			default:
@@ -137,7 +137,7 @@ func CreateSelectorMiddleware(s *Server) chain.Middleware {
 			s.proxylog.Debugf("selector: id=%s target=%s", model, target)
 
 			if selector.Strategy == config.SelectorStrategySpillover {
-				modelConfig, _, local := s.cfg.FindConfig(target)
+				modelConfig, _, local := s.Cfg().FindConfig(target)
 				if local && modelConfig.Compat.IgnoreWebsockets && swaputil.IsWebSocketUpgrade(updated) {
 					// strategySpillover reserves while choosing. Release immediately
 					// so a long-lived ignored websocket does not affect later choices.

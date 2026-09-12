@@ -66,6 +66,16 @@ type Scheduler interface {
 	// swap waiters and queued requests). Process teardown is the baseRouter's
 	// responsibility.
 	OnShutdown(err error)
+	// OnModelReload is called by the baseRouter before it replaces model's
+	// process during a surgical config refresh. The scheduler must release
+	// every waiter and queued request targeting model so none of them hold a
+	// reference to the about-to-be-stopped process. The baseRouter calls
+	// this and, later, drains the queue itself after the swap.
+	OnModelReload(model string)
+	// UpdateModel syncs the scheduler's per-model bookkeeping (concurrency
+	// limits, priorities) with the model's new config, or removes it when
+	// remove is true.
+	UpdateModel(model string, mc config.ModelConfig, remove bool)
 }
 
 // Effects is implemented by the baseRouter. The scheduler calls back through it

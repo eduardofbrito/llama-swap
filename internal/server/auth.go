@@ -5,21 +5,22 @@ import (
 	"strings"
 
 	"github.com/mostlygeek/llama-swap/internal/chain"
-	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 // CreateAuthMiddleware returns middleware that validates API keys when the
 // config declares any. It accepts the key via Authorization: Bearer,
 // Authorization: Basic (password field), or x-api-key. When no keys are
-// configured the middleware is a pass-through.
-func CreateAuthMiddleware(cfg config.Config) chain.Middleware {
-	keys := cfg.RequiredAPIKeys
+// configured the middleware is a pass-through. Keys are read per request so
+// a surgical reload of the config is honored without rebuilding the chain.
+func CreateAuthMiddleware(cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
-		if len(keys) == 0 {
-			return next
-		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			keys := cfg().RequiredAPIKeys
+			if len(keys) == 0 {
+				next.ServeHTTP(w, r)
+				return
+			}
 			provided := swaputil.ExtractAPIKey(r)
 
 			valid := false
@@ -42,12 +43,13 @@ func CreateAuthMiddleware(cfg config.Config) chain.Middleware {
 
 // CreateRequestContextMiddleware returns middleware that extracts model and
 // auth info from the request into the context. Requests where no model can be
-// identified are rejected with a 404.
-func CreateRequestContextMiddleware(cfg config.Config) chain.Middleware {
+// identified are rejected with a 404. cfg is a live accessor so a surgical
+// single-model reload is visible from the next request.
+func CreateRequestContextMiddleware(cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r = markInflightStart(r)
-			data, err := swaputil.FetchContext(r, cfg)
+			data, err := swaputil.FetchContext(r, *cfg())
 			if err != nil {
 				swaputil.SendError(w, r, swaputil.ErrNoModelInContext)
 				return

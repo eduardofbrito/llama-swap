@@ -33,6 +33,7 @@ func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group
 	if err != nil {
 		return nil, fmt.Errorf("creating base router: %w", err)
 	}
+	base.upstreamlog = upstreamlog
 
 	for mid := range modelToGroup {
 		modelCfg, _, ok := conf.FindConfig(mid)

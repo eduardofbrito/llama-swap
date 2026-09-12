@@ -280,6 +280,51 @@ func (s *FIFO) OnUnload(targets []string, timeout time.Duration) {
 	s.drainQueue()
 }
 
+// OnModelReload detaches model from the scheduler's state during a surgical
+// config refresh: any in-flight swap is cancelled (its waiters are released
+// with an error so their callers get a response) and queued requests for it
+// are dropped the same way. Nothing may keep holding the about-to-be-stopped
+// process afterwards. Reservations are released per item so the panics in
+// release() stay reachable only for real accounting bugs.
+func (s *FIFO) OnModelReload(model string) {
+	refreshErr := fmt.Errorf("%s: model reloaded", s.name)
+	if sw, ok := s.active[model]; ok {
+		for _, w := range sw.waiters {
+			s.release(w.Model)
+			s.effects.GrantError(w, refreshErr)
+		}
+		delete(s.active, model)
+	}
+	if len(s.queued) > 0 {
+		kept := s.queued[:0]
+		for _, q := range s.queued {
+			if q.Model == model {
+				s.release(q.Model)
+				s.effects.GrantError(q, refreshErr)
+				continue
+			}
+			kept = append(kept, q)
+		}
+		s.queued = kept
+	}
+	broadcastQueuePositions(s.queued)
+	s.drainQueue()
+}
+
+// UpdateModel resyncs the scheduler's per-model concurrency limits with the
+// (possibly new) model config. Called on the run loop.
+func (s *FIFO) UpdateModel(model string, mc config.ModelConfig, remove bool) {
+	if remove {
+		delete(s.limits, model)
+		return
+	}
+	limit := defaultConcurrencyLimit
+	if mc.ConcurrencyLimit > 0 {
+		limit = mc.ConcurrencyLimit
+	}
+	s.limits[model] = limit
+}
+
 // OnShutdown grants err to every waiter still held by the scheduler.
 func (s *FIFO) OnShutdown(err error) {
 	for _, sw := range s.active {

@@ -223,7 +223,7 @@ func TestServer_HandleAPIUnloadAll(t *testing.T) {
 func TestServer_HandleAPIUnloadModel(t *testing.T) {
 	local := newStubRouter([]string{"m1"}, "")
 	s := newTestServer(local, newStubRouter(nil, ""))
-	s.cfg = config.Config{Models: map[string]config.ModelConfig{"m1": {}}}
+	s.SetCfg(config.Config{Models: map[string]config.ModelConfig{"m1": {}}})
 
 	t.Run("known model", func(t *testing.T) {
 		w := httptest.NewRecorder()

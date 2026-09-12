@@ -51,7 +51,7 @@ func TestServer_RequestContextMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mw := CreateRequestContextMiddleware(cfg)
+	mw := CreateRequestContextMiddleware(cfgAt(cfg))
 
 	t.Run("known model passes through", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama3"}`))
@@ -80,7 +80,7 @@ func TestServer_AuthMiddleware(t *testing.T) {
 	})
 
 	t.Run("no keys configured passes through", func(t *testing.T) {
-		mw := CreateAuthMiddleware(config.Config{})
+		mw := CreateAuthMiddleware(cfgAt(config.Config{}))
 		w := httptest.NewRecorder()
 		mw(final).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 		if w.Code != http.StatusOK {
@@ -91,7 +91,7 @@ func TestServer_AuthMiddleware(t *testing.T) {
 	cfg := config.Config{RequiredAPIKeys: []string{"secret"}}
 
 	t.Run("valid key", func(t *testing.T) {
-		mw := CreateAuthMiddleware(cfg)
+		mw := CreateAuthMiddleware(cfgAt(cfg))
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.Header.Set("Authorization", "Bearer secret")
 		w := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestServer_AuthMiddleware(t *testing.T) {
 	})
 
 	t.Run("invalid key", func(t *testing.T) {
-		mw := CreateAuthMiddleware(cfg)
+		mw := CreateAuthMiddleware(cfgAt(cfg))
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.Header.Set("Authorization", "Bearer wrong")
 		w := httptest.NewRecorder()

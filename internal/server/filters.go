@@ -26,7 +26,7 @@ import (
 // Non-JSON requests (GET, multipart forms) pass through untouched. The buffered
 // body is re-attached with Content-Length / Transfer-Encoding cleanup so the
 // downstream reverse proxy forwards the correct bytes (see issue #11).
-func CreateFilterMiddleware(cfg config.Config) chain.Middleware {
+func CreateFilterMiddleware(cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.Contains(r.Header.Get("Content-Type"), "application/json") {
@@ -34,13 +34,14 @@ func CreateFilterMiddleware(cfg config.Config) chain.Middleware {
 				return
 			}
 
-			data, err := swaputil.FetchContext(r, cfg)
+			live := cfg()
+			data, err := swaputil.FetchContext(r, *live)
 			if err != nil {
 				swaputil.SendError(w, r, swaputil.ErrNoModelInContext)
 				return
 			}
 
-			useModelName, filters, ok := resolveFilters(cfg, data.Model)
+			useModelName, filters, ok := resolveFilters(live, data.Model)
 			if !ok {
 				next.ServeHTTP(w, r)
 				return
@@ -76,7 +77,7 @@ func CreateFilterMiddleware(cfg config.Config) chain.Middleware {
 // Non-multipart requests pass through untouched. When a rewrite is needed the
 // form is reconstructed and re-attached with Content-Type / Content-Length
 // cleanup so the downstream reverse proxy forwards the correct bytes.
-func CreateFormFilterMiddleware(cfg config.Config) chain.Middleware {
+func CreateFormFilterMiddleware(cfg ConfigAt) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
@@ -84,13 +85,14 @@ func CreateFormFilterMiddleware(cfg config.Config) chain.Middleware {
 				return
 			}
 
-			data, err := swaputil.FetchContext(r, cfg)
+			live := cfg()
+			data, err := swaputil.FetchContext(r, *live)
 			if err != nil {
 				swaputil.SendError(w, r, swaputil.ErrNoModelInContext)
 				return
 			}
 
-			useModelName, _, ok := resolveFilters(cfg, data.Model)
+			useModelName, _, ok := resolveFilters(live, data.Model)
 			if !ok || useModelName == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -113,7 +115,7 @@ func CreateFormFilterMiddleware(cfg config.Config) chain.Middleware {
 
 // resolveFilters returns the filter settings for a requested model. UseModelName
 // only applies to local models; peers carry filters but no name rewrite.
-func resolveFilters(cfg config.Config, requested string) (useModelName string, filters config.Filters, ok bool) {
+func resolveFilters(cfg *config.Config, requested string) (useModelName string, filters config.Filters, ok bool) {
 	if realName, found := cfg.RealModelName(requested); found {
 		mc := cfg.Models[realName]
 		return mc.UseModelName, mc.Filters.Filters, true

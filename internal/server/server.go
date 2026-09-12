@@ -27,7 +27,11 @@ import (
 // dispatch. It supersedes router.Server: it builds the local and peer routers
 // directly and dispatches between them itself.
 type Server struct {
-	cfg config.Config
+	// cfg is the live config, read via Cfg(). It is swapped atomically by a
+	// surgical single-model reload (SetCfg) so handlers and middleware see
+	// the new model config without rebuilding the server (which would drop
+	// every running model). Readers hold a snapshot for one operation.
+	cfg atomic.Pointer[config.Config]
 
 	muxlog      *logmon.Monitor
 	proxylog    *logmon.Monitor
@@ -63,8 +67,14 @@ type Server struct {
 	// enables the config editing endpoints; empty when the config came only
 	// from a -config-dir merge, which disables them.
 	configPath string
-	// reloadFn triggers a hot reload of the config (wired by the caller so
-	// the full reload pipeline runs). nil disables the reload endpoint.
+	// configDir is the -config-dir merge source; empty when the config came
+	// from a single file. Needed to re-load the merged config during a
+	// surgical single-model reload.
+	configDir string
+	// reloadFn triggers a full hot reload (rebuilds the server, drops every
+	// running model). It is the fallback for surgical reloads whose diff is
+	// not model-only, and the only path for reloads without ?model=.
+	// nil disables the reload endpoint.
 	reloadFn func()
 
 	mux     *http.ServeMux
@@ -74,6 +84,16 @@ type Server struct {
 	shutdownFn     context.CancelFunc
 	shuttingDown   atomic.Bool
 	tailcatAddress atomic.Pointer[string]
+}
+
+// ConfigAt is a live-config accessor passed to middleware so a surgical
+// single-model reload is visible from the next request without rebuilding
+// the handler chain. The returned pointer is a snapshot: a concurrent reload
+// simply takes effect on the next read.
+type ConfigAt func() *config.Config
+
+func (s *Server) configAt() ConfigAt {
+	return func() *config.Config { return s.Cfg() }
 }
 
 func (s *Server) SetTailcatAddress(address string) {
@@ -86,6 +106,24 @@ func (s *Server) TailcatAddress() string {
 		return *value
 	}
 	return ""
+}
+
+// Cfg returns a pointer to the current live config. Readers treat it as a
+// snapshot: a surgical single-model reload swaps the underlying pointer
+// atomically, and a request that captured the old pointer keeps a consistent
+// view for its whole life. The pointer (not a value) is returned so that
+// pointer-receiver config methods (RealModelName, FindConfig, ...) keep
+// working directly on it.
+func (s *Server) Cfg() *config.Config {
+	return s.cfg.Load()
+}
+
+// SetCfg atomically publishes a new config snapshot. Called by a surgical
+// single-model reload and by a full reload. The new config must be a fresh
+// value (its own maps) produced by the load pipeline, not a mutation of the
+// previous snapshot.
+func (s *Server) SetCfg(c config.Config) {
+	s.cfg.Store(&c)
 }
 
 type tailcatRequestContextKey struct{}
@@ -103,6 +141,56 @@ func (s *Server) WithConfigEdit(configPath string, reloadFn func()) {
 	s.reloadFn = reloadFn
 }
 
+// WithConfigDir records the -config-dir merge source so a surgical reload can
+// re-run the same load/merge pipeline the initial config used. No-op when the
+// config came from a single file.
+func (s *Server) WithConfigDir(configDir string) {
+	s.configDir = configDir
+}
+
+// SurgicalReload re-reads the config sources, diffs them against the live
+// config, and — when the diff is model-only — swaps only the named model's
+// config and process, leaving every other model running. It returns an error
+// when the diff touches anything outside model blocks (selectors, profiles,
+// peers, global settings) or when the model refresh itself fails; in both
+// cases the caller should fall back to a full reload.
+func (s *Server) SurgicalReload(model string) error {
+	newCfg, err := config.LoadConfigSources(s.configPath, s.configDir)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	changed, ok := config.DiffModels(*s.Cfg(), newCfg)
+	if !ok {
+		return fmt.Errorf("diff is not model-only; full reload required")
+	}
+	if len(changed) == 0 {
+		// Nothing in the model blocks changed; the running config is
+		// already current. No-op is correct (idempotent save).
+		return nil
+	}
+	// Model-only change, but a surgical refresh must be scoped to exactly the
+	// model the UI just edited. A mismatch (or >1 changed) means the edit
+	// touched a block the UI didn't claim; a full reload is the safe
+	// interpretation.
+	if len(changed) != 1 || changed[0] != model {
+		return fmt.Errorf("diff spans models %q, requested %q; full reload required",
+			strings.Join(changed, ", "), model)
+	}
+	// Note: a model-block edit cannot change the tailcat block, global
+	// settings, or router structure — DiffModels would report ok=false and
+	// force a full reload. So the tailcat listener, log level, and planner
+	// config are all still valid and need no re-application here.
+	// Publish the new config snapshot first so any request arriving after the
+	// refresh see the new model block, then let the router swap the process.
+	// RefreshModel serializes against in-flight swaps/unloads on its run loop
+	// and leaves the router untouched on failure.
+	s.SetCfg(newCfg)
+	if err := s.local.RefreshModel(changed[0], newCfg); err != nil {
+		return fmt.Errorf("refresh model: %w", err)
+	}
+	return nil
+}
+
 // ActiveProfile returns the active runtime profile, or an empty string when no
 // profile is active.
 func (s *Server) ActiveProfile() string {
@@ -115,7 +203,7 @@ func (s *Server) ActiveProfile() string {
 // profiles. It returns whether the selection changed.
 func (s *Server) setActiveProfile(name string) (bool, error) {
 	if name != "" {
-		if _, ok := s.cfg.Profiles[name]; !ok {
+		if _, ok := s.Cfg().Profiles[name]; !ok {
 			return false, fmt.Errorf("profile %q not found", name)
 		}
 	}
@@ -237,7 +325,7 @@ func New(cfg config.Config, muxlog *logmon.Monitor, proxylog *logmon.Monitor, up
 
 	shutdownCtx, shutdownFn := context.WithCancel(context.Background())
 	s := &Server{
-		cfg:           cfg,
+		cfg:           atomic.Pointer[config.Config]{},
 		muxlog:        muxlog,
 		proxylog:      proxylog,
 		upstreamlog:   upstreamlog,
@@ -254,6 +342,7 @@ func New(cfg config.Config, muxlog *logmon.Monitor, proxylog *logmon.Monitor, up
 		shutdownCtx:   shutdownCtx,
 		shutdownFn:    shutdownFn,
 	}
+	s.cfg.Store(&cfg)
 	// SysProvider is constructed here because this is where perf and hardware
 	// are in scope; wiring those in later is a change to internal/mcptools.
 	tools, err := mcptools.New(
@@ -277,7 +366,7 @@ func (s *Server) localPeerHandler(w http.ResponseWriter, r *http.Request) {
 	stripVersionPrefix(r)
 	stripAudioAPIPrefix(r)
 
-	data, err := swaputil.FetchContext(r, s.cfg)
+	data, err := swaputil.FetchContext(r, *s.Cfg())
 	if err != nil {
 		swaputil.SendError(w, r, swaputil.ErrNoModelInContext)
 		return
@@ -314,22 +403,25 @@ func stripAudioAPIPrefix(r *http.Request) {
 // global CORS middleware.
 func (s *Server) routes() {
 
-	authMW := CreateAuthMiddleware(s.cfg)
+	authMW := CreateAuthMiddleware(s.configAt())
 	modelMWs := []chain.Middleware{authMW}
 	// globalConcurrencyLimit guards the top of the inference chain; a limit of
 	// 0 (the default) means no limit, so the handler is left out of the chain
 	// entirely rather than wrapping every request in a no-op semaphore.
-	if s.cfg.GlobalConcurrencyLimit > 0 {
-		modelMWs = append(modelMWs, CreateConcurrencyLimitMiddleware(s.cfg.GlobalConcurrencyLimit))
+	// Surgical reloads never change it (a change here falls back to a full
+	// reload), so reading it once at build time is safe.
+	liveCfg := s.configAt()
+	if s.Cfg().GlobalConcurrencyLimit > 0 {
+		modelMWs = append(modelMWs, CreateConcurrencyLimitMiddleware(s.Cfg().GlobalConcurrencyLimit))
 	}
 	modelMWs = append(modelMWs,
 		CreateProfileMiddleware(s),
 		CreateSelectorMiddleware(s),
-		CreateRequestContextMiddleware(s.cfg),
-		CreateInflightMiddleware(s.inflight, s.cfg),
-		CreateFilterMiddleware(s.cfg),
-		CreateFormFilterMiddleware(s.cfg),
-		CreateMetricsMiddleware(s.metrics, s.cfg),
+		CreateRequestContextMiddleware(liveCfg),
+		CreateInflightMiddleware(s.inflight, liveCfg),
+		CreateFilterMiddleware(liveCfg),
+		CreateFormFilterMiddleware(liveCfg),
+		CreateMetricsMiddleware(s.metrics, liveCfg),
 	)
 	modelChain := chain.New(modelMWs...)
 	// Custom endpoints only need auth.
@@ -374,8 +466,8 @@ func (s *Server) routes() {
 	// produce token usage/timings.
 	upstreamChain := apiChain.Append(
 		CreateProfileMiddleware(s),
-		CreateUpstreamInflightMiddleware(s.inflight, s.cfg),
-		CreateMetricsMiddleware(s.metrics, s.cfg),
+		CreateUpstreamInflightMiddleware(s.inflight, s.configAt()),
+		CreateMetricsMiddleware(s.metrics, s.configAt()),
 	)
 	mux.HandleFunc("GET /upstream", handleUpstreamRedirect)
 	mux.Handle("/upstream/{upstreamPath...}", upstreamChain.ThenFunc(s.handleUpstream))
@@ -423,8 +515,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ServeTailcatHTTP applies Tailcat's deliberately narrow HTTP capability
 // surface before delegating to the normal, API-key-protected handler.
 func (s *Server) ServeTailcatHTTP(w http.ResponseWriter, r *http.Request) {
-	tc := s.cfg.Tailcat
-	if !s.cfg.TailcatEnabled() || tc == nil {
+	tc := s.Cfg().Tailcat
+	if !s.Cfg().TailcatEnabled() || tc == nil {
 		http.NotFound(w, r)
 		return
 	}

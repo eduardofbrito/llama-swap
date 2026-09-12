@@ -412,6 +412,7 @@ func main() {
 	if editPath != "" {
 		wireConfigEdit = func(srv *server.Server) {
 			srv.WithConfigEdit(editPath, reload)
+			srv.WithConfigDir(*flagConfigDir)
 		}
 		wireConfigEdit(initialSrv)
 	}

@@ -36,6 +36,7 @@ func NewMatrix(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Matr
 	if err != nil {
 		return nil, fmt.Errorf("creating base router: %w", err)
 	}
+	base.upstreamlog = upstreamlog
 
 	for mid, modelCfg := range conf.Models {
 		procLog := logmon.NewWriter(upstreamlog)
