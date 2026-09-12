@@ -849,6 +849,12 @@
                                 "fifo": {
                                     "type": "object",
                                     "properties": {
+                                        "recentPoolSize": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "default": 0,
+                                            "description": "Keep the N most recently used models loaded instead of unloading them. When the router's swapper asks for a model to be evicted, the scheduler holds it back while the model is among the N most recent, letting only the least recently used one go once the pool is full. The pool can only hold back evictions the swapper asked for, so the hardware must have room for N models at once. 0 or 1 (the default) leaves every eviction decision to the swapper."
+                                        },
                                         "priority": {
                                             "type": "object",
                                             "description": "Per-model priority. Keys are model IDs, values are integers (default 0). Higher values are serviced first.",

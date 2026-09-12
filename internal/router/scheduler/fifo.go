@@ -39,6 +39,15 @@ type FIFO struct {
 	cfg     config.FifoConfig
 	effects Effects
 
+	// recentPool is every model that has served, most recently used first. It
+	// is deliberately NOT truncated to the pool size: a model that is never an
+	// eviction candidate (a persistent group member answering a request
+	// between two swaps) would otherwise push the pool's own models out of the
+	// recency order and collapse their standing. poolEviction picks its keep
+	// set out of the eviction candidates instead, so extra entries are
+	// harmless.
+	recentPool []string
+
 	limits   map[string]int
 	active   map[string]*activeSwap
 	reserved map[string]int
@@ -125,8 +134,7 @@ func (s *FIFO) OnRequest(req HandlerReq) {
 		return
 	}
 
-	running := s.runningSet(req.Model)
-	evict := s.planner.EvictionFor(req.Model, running)
+	running, evict := s.evictionFor(req.Model)
 
 	// (3) Fast path: ready, nothing to evict, and nobody is evicting us.
 	if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
@@ -288,6 +296,7 @@ func (s *FIFO) OnUnload(targets []string, timeout time.Duration) {
 // release() stay reachable only for real accounting bugs.
 func (s *FIFO) OnModelReload(model string) {
 	refreshErr := fmt.Errorf("%s: model reloaded", s.name)
+	s.forgetModel(model)
 	if sw, ok := s.active[model]; ok {
 		for _, w := range sw.waiters {
 			s.release(w.Model)
@@ -325,6 +334,90 @@ func (s *FIFO) UpdateModel(model string, mc config.ModelConfig, remove bool) {
 	s.limits[model] = limit
 }
 
+// markModelUsed moves modelID to the front of the recency list. See the
+// recentPool field for why the list is never truncated here.
+func (s *FIFO) markModelUsed(modelID string) {
+	for i, id := range s.recentPool {
+		if id == modelID {
+			s.recentPool = append(s.recentPool[:i], s.recentPool[i+1:]...)
+			break
+		}
+	}
+	s.recentPool = append([]string{modelID}, s.recentPool...)
+}
+
+// forgetModel drops a model from the recency list. Called when a surgical
+// config reload replaces or removes the model, so a stale ID cannot keep
+// holding a pool slot for a process that no longer exists.
+func (s *FIFO) forgetModel(modelID string) {
+	for i, id := range s.recentPool {
+		if id == modelID {
+			s.recentPool = append(s.recentPool[:i], s.recentPool[i+1:]...)
+			return
+		}
+	}
+}
+
+// evictionFor is the single eviction decision for target: the swapper's own
+// eviction set, minus whatever the recent-model pool holds back. Both
+// OnRequest and drainQueue go through here, so a request that waited in the
+// queue is decided exactly like one that never had to.
+func (s *FIFO) evictionFor(target string) (running, evict []string) {
+	running = s.runningSet(target)
+	evict = s.planner.EvictionFor(target, running)
+	return running, s.poolEviction(target, evict)
+}
+
+// poolEviction holds the swapper back: the RecentPoolSize most recently used
+// models stay loaded even when the swapper asked for them to be unloaded, so
+// the pool behaves as an LRU working set — loading a new model pushes out the
+// least recently used one instead of every other model.
+//
+// It only ever removes IDs from evict, never adds any. Models the swapper
+// deliberately keeps resident — a persistent group, a model the planner never
+// nominated — were never in evict to begin with and stay untouched.
+//
+// Sizing the pool is the operator's call: what it keeps loaded is exactly what
+// the swapper wanted unloaded to free capacity, so the hardware has to have
+// room for RecentPoolSize models at once. 0 or 1 disables the pool and leaves
+// every eviction decision to the swapper.
+func (s *FIFO) poolEviction(target string, evict []string) []string {
+	size := s.cfg.RecentPoolSize
+	if size <= 1 || len(evict) == 0 {
+		return evict
+	}
+
+	candidates := make(map[string]struct{}, len(evict))
+	for _, id := range evict {
+		candidates[id] = struct{}{}
+	}
+
+	// target occupies one slot — it is about to serve, and becomes the most
+	// recently used model once granted — leaving size-1 slots for the
+	// candidates, handed out in recency order.
+	keep := make(map[string]struct{}, size-1)
+	for _, id := range s.recentPool {
+		if len(keep) >= size-1 {
+			break
+		}
+		if id == target {
+			continue
+		}
+		if _, isCandidate := candidates[id]; isCandidate {
+			keep[id] = struct{}{}
+		}
+	}
+
+	kept := make([]string, 0, len(evict))
+	for _, id := range evict {
+		if _, held := keep[id]; held {
+			continue
+		}
+		kept = append(kept, id)
+	}
+	return kept
+}
+
 // OnShutdown grants err to every waiter still held by the scheduler.
 func (s *FIFO) OnShutdown(err error) {
 	for _, sw := range s.active {
@@ -346,6 +439,8 @@ func (s *FIFO) grantHandler(req HandlerReq, modelID string) {
 	if err := swaputil.SetReqData(req.Ctx, "fifo_priority", strconv.Itoa(s.cfg.Priority[req.Model])); err != nil {
 		s.logger.Debugf("failed to set fifo_priority metadata: %v", err)
 	}
+
+	s.markModelUsed(modelID)
 
 	if s.effects.GrantServe(req, modelID) {
 		s.inFlight[modelID]++
@@ -485,8 +580,7 @@ func (s *FIFO) drainQueue() {
 			sw.waiters = append(sw.waiters, req)
 			continue
 		}
-		running := s.runningSet(req.Model)
-		evict := s.planner.EvictionFor(req.Model, running)
+		running, evict := s.evictionFor(req.Model)
 		if state == process.StateReady && len(evict) == 0 && !collidesWith(req.Model, evict, s.active) {
 			s.logger.Debugf("%s: queued request for model %s now served fast-path", s.name, req.Model)
 			s.grantHandler(req, req.Model)

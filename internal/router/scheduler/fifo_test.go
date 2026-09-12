@@ -1123,3 +1123,97 @@ func TestFIFO_ManualOnly_DrainQueueErrorsStaleRequests(t *testing.T) {
 		t.Errorf("queue len=%d want 0", len(s.queued))
 	}
 }
+
+// newPoolFIFO builds a FIFO with the recent-model pool sized to n and a
+// pre-seeded recency list (most recently used first).
+func newPoolFIFO(n int, recent []string) *FIFO {
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{},
+		config.FifoConfig{RecentPoolSize: n}, nil, newFakeEffects())
+	s.recentPool = append([]string(nil), recent...)
+	return s
+}
+
+// TestFIFO_PoolEvictionOnlyRemoves pins the safety property of the pool for
+// every size: whatever it returns must be a subset of what the swapper asked
+// for. The pool may hold an eviction back; it may never invent one.
+func TestFIFO_PoolEvictionOnlyRemoves(t *testing.T) {
+	asked := []string{"m1", "m2", "m3"}
+	askedSet := map[string]struct{}{"m1": {}, "m2": {}, "m3": {}}
+
+	for size := 0; size <= 5; size++ {
+		s := newPoolFIFO(size, []string{"m3", "m2", "m1", "target"})
+		got := s.poolEviction("target", append([]string(nil), asked...))
+
+		for _, id := range got {
+			if _, ok := askedSet[id]; !ok {
+				t.Fatalf("size=%d: pool added %q to the eviction set", size, id)
+			}
+		}
+		want := len(asked)
+		if size > 1 {
+			want = max(len(asked)-(size-1), 0)
+		}
+		if len(got) != want {
+			t.Errorf("size=%d: evicts %v (%d), want %d models evicted", size, got, len(got), want)
+		}
+	}
+}
+
+// TestFIFO_PoolEvictionKeepsMostRecentFirst checks the order the pool spends
+// its slots in: the most recently used candidates are the ones held back.
+func TestFIFO_PoolEvictionKeepsMostRecentFirst(t *testing.T) {
+	// Recency: m3 newest, then m2, then m1. Pool of 3 = target + 2 held back,
+	// so m3 and m2 survive and m1 (least recent) is evicted.
+	s := newPoolFIFO(3, []string{"m3", "m2", "m1"})
+	got := s.poolEviction("target", []string{"m1", "m2", "m3"})
+	if len(got) != 1 || got[0] != "m1" {
+		t.Errorf("evicts %v, want [m1] (the least recently used candidate)", got)
+	}
+}
+
+// TestFIFO_PoolEvictionIgnoresNonCandidates is the bug the pool's design
+// avoids: a model in the recency list that the swapper did NOT nominate (a
+// persistent member that served between two swaps) must not consume a pool
+// slot, which would otherwise collapse the retention of the real candidates.
+func TestFIFO_PoolEvictionIgnoresNonCandidates(t *testing.T) {
+	// "persistent" is the most recent, but it is not an eviction candidate.
+	s := newPoolFIFO(2, []string{"persistent", "m2", "m1"})
+	got := s.poolEviction("target", []string{"m1", "m2"})
+	// One slot for the candidates: m2 (most recent candidate) is held back.
+	if len(got) != 1 || got[0] != "m1" {
+		t.Errorf("evicts %v, want [m1]; a non-candidate must not consume a pool slot", got)
+	}
+}
+
+// TestFIFO_MarkModelUsedMovesToFrontWithoutDuplicates checks the recency list
+// bookkeeping, including that a re-served model moves rather than duplicates.
+func TestFIFO_MarkModelUsedMovesToFrontWithoutDuplicates(t *testing.T) {
+	s := newPoolFIFO(2, nil)
+	for _, id := range []string{"a", "b", "c", "a"} {
+		s.markModelUsed(id)
+	}
+	want := []string{"a", "c", "b"}
+	if len(s.recentPool) != len(want) {
+		t.Fatalf("recentPool = %v, want %v", s.recentPool, want)
+	}
+	for i := range want {
+		if s.recentPool[i] != want[i] {
+			t.Fatalf("recentPool = %v, want %v", s.recentPool, want)
+		}
+	}
+}
+
+// TestFIFO_ForgetModelDropsFromRecency makes sure a surgical config reload
+// does not leave a stale ID holding a pool slot for a process that is gone.
+func TestFIFO_ForgetModelDropsFromRecency(t *testing.T) {
+	s := newPoolFIFO(2, []string{"a", "b", "c"})
+	s.forgetModel("b")
+	for _, id := range s.recentPool {
+		if id == "b" {
+			t.Fatalf("b still in recentPool %v after forgetModel", s.recentPool)
+		}
+	}
+	if len(s.recentPool) != 2 {
+		t.Errorf("recentPool = %v, want the other two entries kept", s.recentPool)
+	}
+}

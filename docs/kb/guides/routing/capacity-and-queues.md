@@ -2,8 +2,8 @@
 title: Routing capacity and request queues
 summary: Configure concurrencyLimit and globalConcurrencyLimit, and understand queued work while a model is loading or busy.
 category: guides
-tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503]
-config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly]
+tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram]
+config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, routing.scheduler.settings.fifo.recentPoolSize]
 updated: 2026-09-12
 ---
 
@@ -76,3 +76,42 @@ The failure mode to watch for: with `manualOnly: true` and no one loading the
 model, **every** inference request 503s forever. If clients report a model that
 is permanently unavailable, check the Models page — a `manual` badge and a
 `stopped` state mean it is waiting to be loaded, not broken.
+
+## Keep recently used models loaded
+
+By default a swap unloads every model the router's swapper nominated, so
+loading a second model flushes the first even when the GPU had room for both.
+`recentPoolSize` turns that into an LRU working set:
+
+```yaml
+routing:
+  scheduler:
+    use: fifo
+    settings:
+      fifo:
+        recentPoolSize: 3
+```
+
+With a pool of 3, the three most recently used models stay loaded; requesting a
+fourth unloads only the least recently used one. `0` and `1` both disable it
+and leave every eviction decision to the swapper.
+
+Two properties worth relying on:
+
+- **The pool only ever holds an eviction back — it never invents one.** What it
+  keeps loaded is always a subset of what the swapper asked to unload, so a
+  model the swapper deliberately keeps resident (a `persistent` group member) is
+  never affected, and nothing is unloaded that would not have been anyway.
+- **A model that is not an eviction candidate does not consume a pool slot.** A
+  persistent member answering requests between two swaps would otherwise sit at
+  the top of the recency list and starve the pool of the models it exists to
+  protect.
+
+The failure mode: `recentPoolSize` is a promise about your hardware, not a
+request. What the pool keeps loaded is precisely what the swapper wanted
+unloaded to free capacity, so setting it to 3 on a GPU that fits two models
+means the third load fails — or the driver starts swapping — instead of the
+swapper cleanly making room. Set it to the number of models that genuinely fit
+in VRAM at once, and see
+`guides/model-runtime/troubleshooting-model-wont-load` when a load starts
+failing after you raise it.

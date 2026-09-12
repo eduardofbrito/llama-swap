@@ -709,6 +709,20 @@ routing:
     use: fifo
     settings:
       fifo:
+        # recentPoolSize: keep the N most recently used models loaded
+        # - optional, default: 0 (disabled; 1 behaves the same)
+        # - by default, loading a model unloads every other model the swapper
+        #   nominated. With a pool, the N most recently used models are held
+        #   back instead, so loading a new one evicts only the least recently
+        #   used — an LRU working set rather than a full flush
+        # - the pool can ONLY hold back evictions the swapper asked for. It
+        #   never keeps a model the swapper wanted resident anyway, and never
+        #   unloads anything on its own
+        # - your hardware must have room for N models at once: what the pool
+        #   keeps loaded is exactly what the swapper wanted unloaded to free
+        #   capacity. Set it to how many models actually fit in VRAM
+        recentPoolSize: 0
+
         # priority: a dictionary of model ID -> priority
         # - optional, default: empty dictionary
         # - models default to priority 0
