@@ -22,23 +22,31 @@
 
   let dirty = $derived(yamlText !== original);
 
+  // Guards against a slow response for an older model overwriting a newer
+  // load (rapid model-to-model navigation while the network is slow).
+  let loadGeneration = $state(0);
+
   async function load(): Promise<void> {
     loading = true;
     loadError = "";
+    const gen = ++loadGeneration;
     try {
       const response = await fetch(`/api/config/model/${encodeURIComponent(modelId)}`);
+      if (gen !== loadGeneration) return; // a newer load started; discard
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         const msg = (body as any).error?.message ?? (body as any).error ?? `HTTP ${response.status}`;
         throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
       }
       const data = (await response.json()) as { yaml: string };
+      if (gen !== loadGeneration) return; // a newer load started; discard
       yamlText = data.yaml;
       original = data.yaml;
     } catch (error) {
+      if (gen !== loadGeneration) return;
       loadError = error instanceof Error ? error.message : "Falha ao carregar configuração";
     } finally {
-      loading = false;
+      if (gen === loadGeneration) loading = false;
     }
   }
 
@@ -86,6 +94,18 @@
 
   onMount(() => {
     void load();
+  });
+
+  // The SPA reuses this component when navigating between /model/[id] pages
+  // (onMount does NOT re-run), so re-load whenever the model id changes —
+  // otherwise the previous model's YAML text would be shown for the new one.
+  let lastModelId = $state(modelId);
+  $effect(() => {
+    if (modelId !== lastModelId) {
+      lastModelId = modelId;
+      result = null;
+      void load();
+    }
   });
 </script>
 
