@@ -414,3 +414,79 @@ func TestStore_NewFileUsesWAL(t *testing.T) {
 		t.Fatalf("journal_mode = %q, want wal", mode)
 	}
 }
+
+func TestStore_ModelVRAMRoundTrip(t *testing.T) {
+	st, err := New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	// Nothing recorded yet.
+	all, err := st.ModelVRAMAll(ctx)
+	if err != nil {
+		t.Fatalf("ModelVRAMAll: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("ModelVRAMAll = %v, want empty", all)
+	}
+
+	if err := st.RecordModelVRAM(ctx, "alpha", 18000); err != nil {
+		t.Fatalf("RecordModelVRAM: %v", err)
+	}
+	if err := st.RecordModelVRAM(ctx, "beta", 4096); err != nil {
+		t.Fatalf("RecordModelVRAM: %v", err)
+	}
+
+	all, err = st.ModelVRAMAll(ctx)
+	if err != nil {
+		t.Fatalf("ModelVRAMAll: %v", err)
+	}
+	if all["alpha"] != 18000 || all["beta"] != 4096 {
+		t.Errorf("ModelVRAMAll = %v, want alpha=18000 beta=4096", all)
+	}
+
+	// A newer measurement replaces the old one: the latest load reflects the
+	// model's current command line, and a stale reading says nothing useful.
+	if err := st.RecordModelVRAM(ctx, "alpha", 21000); err != nil {
+		t.Fatalf("RecordModelVRAM (update): %v", err)
+	}
+	all, err = st.ModelVRAMAll(ctx)
+	if err != nil {
+		t.Fatalf("ModelVRAMAll: %v", err)
+	}
+	if all["alpha"] != 21000 {
+		t.Errorf("alpha = %d, want the replaced value 21000", all["alpha"])
+	}
+	if len(all) != 2 {
+		t.Errorf("ModelVRAMAll has %d rows, want 2 (the update must not insert a new one)", len(all))
+	}
+}
+
+func TestStore_RecordModelVRAMRejectsGarbage(t *testing.T) {
+	st, err := New("")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		model string
+		mb    int
+	}{
+		{"empty model", "", 1000},
+		{"zero mb", "alpha", 0},
+		{"negative mb", "alpha", -5},
+	} {
+		if err := st.RecordModelVRAM(ctx, tc.model, tc.mb); err == nil {
+			t.Errorf("%s: expected an error", tc.name)
+		}
+	}
+	all, _ := st.ModelVRAMAll(ctx)
+	if len(all) != 0 {
+		t.Errorf("ModelVRAMAll = %v, want nothing written", all)
+	}
+}

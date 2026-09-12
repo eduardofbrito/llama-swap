@@ -255,6 +255,50 @@ type FifoConfig struct {
 	// — so the hardware must have room for N models at once. 0 or 1 (the
 	// default) leaves every eviction decision to the swapper.
 	RecentPoolSize int `yaml:"recentPoolSize"`
+
+	// VramCheck refuses to start a model when the GPU it would load onto does
+	// not have enough free memory for it, instead of letting the load fail
+	// deep inside the runtime. It exists for GPUs that llama-swap does not
+	// have to itself: another process (a training job, a second llama-swap, a
+	// desktop session) can hold memory that the router knows nothing about, so
+	// "every model I evicted is stopped" is not the same as "the memory is
+	// free". Off by default.
+	//
+	// A model's requirement is models.*.vramMB when declared, otherwise the
+	// value measured on its last successful load. A model with neither is
+	// always admitted: refusing on ignorance would be worse than today's
+	// behaviour.
+	VramCheck bool `yaml:"vramCheck"`
+
+	// VramMarginPct is the headroom kept free on top of a model's requirement,
+	// as a percentage of it. Runtimes allocate more than the weights (KV
+	// cache growth, fragmentation, CUDA context), and a measurement taken on
+	// one run is not a ceiling for the next. Defaults to
+	// DefaultVramMarginPct when VramCheck is on.
+	VramMarginPct int `yaml:"vramMarginPct"`
+
+	// EvictBeyondPoolOnPressure lets a load that does not fit fall back to
+	// evicting models the recent-model pool was holding back, instead of being
+	// refused. It trades the pool's retention for availability: with it off
+	// (the default) the pool is honoured and the request gets a 503, which
+	// keeps capacity honest and predictable.
+	EvictBeyondPoolOnPressure bool `yaml:"evictBeyondPoolOnPressure"`
+}
+
+// DefaultVramMarginPct is the headroom kept on top of a model's VRAM
+// requirement when routing.scheduler.settings.fifo.vramMarginPct is unset.
+const DefaultVramMarginPct = 5
+
+// VramMargin returns the configured headroom percentage, or the default when
+// unset. A negative value disables the margin entirely.
+func (c FifoConfig) VramMargin() int {
+	if c.VramMarginPct == 0 {
+		return DefaultVramMarginPct
+	}
+	if c.VramMarginPct < 0 {
+		return 0
+	}
+	return c.VramMarginPct
 }
 
 type RouterConfig struct {

@@ -2,8 +2,8 @@
 title: Routing capacity and request queues
 summary: Configure concurrencyLimit and globalConcurrencyLimit, and understand queued work while a model is loading or busy.
 category: guides
-tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram]
-config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, routing.scheduler.settings.fifo.recentPoolSize]
+tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram, gpu-memory, oom, insufficient-vram]
+config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, models.*.vramMB, routing.scheduler.settings.fifo.recentPoolSize, routing.scheduler.settings.fifo.vramCheck, routing.scheduler.settings.fifo.vramMarginPct, routing.scheduler.settings.fifo.evictBeyondPoolOnPressure]
 updated: 2026-09-12
 ---
 
@@ -115,3 +115,75 @@ swapper cleanly making room. Set it to the number of models that genuinely fit
 in VRAM at once, and see
 `guides/model-runtime/troubleshooting-model-wont-load` when a load starts
 failing after you raise it.
+
+## Refuse loads the GPU has no room for
+
+`recentPoolSize` assumes llama-swap owns the GPU: it reasons about the models
+it started and nothing else. That assumption breaks when a training job, a
+second llama-swap, or a desktop session holds VRAM — "every model I evicted is
+stopped" stops meaning "the memory is free", and the load fails deep inside the
+runtime minutes later.
+
+`vramCheck` turns that into an immediate answer:
+
+```yaml
+routing:
+  scheduler:
+    use: fifo
+    settings:
+      fifo:
+        vramCheck: true
+        vramMarginPct: 5
+
+models:
+  big-70b:
+    cmd: llama-server --model /models/big-70b.gguf --port ${PORT}
+    env:
+      - CUDA_VISIBLE_DEVICES=0
+    vramMB: 41000
+```
+
+Before starting a swap the router compares the target's requirement (plus
+`vramMarginPct` headroom) against what is actually free on the GPU it would
+load onto, counting the memory this swap's evictions are about to give back. A
+model that does not fit gets HTTP 503 with error code `insufficient_vram`, so a
+gateway fails over at once instead of waiting out a doomed load.
+
+### Where the requirement comes from
+
+`models.*.vramMB` is the declared value and always wins. When it is absent,
+llama-swap uses what it measured on that model's last successful load — the
+rise in the GPU's used memory across the load, persisted in the store so it
+survives a restart.
+
+Declare the number for models whose load must never be attempted on a GPU that
+cannot hold them. Leave it out for the rest and let llama-swap learn it; the
+first load of an unmeasured model is always admitted, because refusing on
+ignorance would be worse than not checking at all.
+
+### When there is no room
+
+By default the request is refused and the recent-model pool keeps what it
+promised. `evictBeyondPoolOnPressure: true` reverses that trade: the pool's
+held-back evictions are given up so the load can proceed. Even then a request
+is refused when evicting everything still does not free enough — that is the
+signal that the memory belongs to something outside llama-swap.
+
+### What it deliberately does not do
+
+Every case where the guard cannot answer honestly admits the model, so turning
+`vramCheck` on cannot break a working setup:
+
+- a model with no declared and no measured requirement;
+- a model pinned to a device the host does not report, such as a multi-GPU
+  `CUDA_VISIBLE_DEVICES=0,1`;
+- a host that reports no GPU memory at all (no performance monitor, CPU-only);
+- a model that is already loaded — it holds its memory already, and re-checking
+  would double-count it.
+
+A model that pins no GPU is checked against the device with the most free
+memory, since that is where it has the best chance of fitting.
+
+The failure mode to watch for: a model whose measured value came from a
+smaller context or `-ngl` than it now runs with will be admitted onto a GPU
+that cannot hold it. Declaring `vramMB` is what makes the check exact.

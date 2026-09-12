@@ -33,7 +33,7 @@ func newTestMatrix(t *testing.T, conf config.Config, sets config.OrderedSets, ev
 		solver: newMatrixSolver(matrix.Program(), matrix.ResolvedEvictCosts()),
 		logger: logger,
 	}
-	base, err := newBaseRouter("matrix", conf, processes, logger, logmon.NewWriter(io.Discard), swapper)
+	base, err := newBaseRouter("matrix", conf, processes, logger, logmon.NewWriter(io.Discard), nil, swapper)
 	if err != nil {
 		t.Fatalf("newBaseRouter: %v", err)
 	}

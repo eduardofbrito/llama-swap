@@ -47,7 +47,7 @@ func newTestBase(t *testing.T, processes map[string]process.Process, planner sch
 
 func newTestBaseWithConfig(t *testing.T, conf config.Config, processes map[string]process.Process, planner scheduler.Swapper) *baseRouter {
 	t.Helper()
-	b, err := newBaseRouter("test", conf, processes, logmon.NewWriter(io.Discard), logmon.NewWriter(io.Discard), planner)
+	b, err := newBaseRouter("test", conf, processes, logmon.NewWriter(io.Discard), logmon.NewWriter(io.Discard), nil, planner)
 	if err != nil {
 		t.Fatalf("newBaseRouter: %v", err)
 	}

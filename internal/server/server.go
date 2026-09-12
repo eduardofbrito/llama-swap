@@ -301,14 +301,18 @@ func New(cfg config.Config, muxlog *logmon.Monitor, proxylog *logmon.Monitor, up
 	var local router.LocalRouter
 	var err error
 
+	// The router asks this before starting a swap, to refuse a load the GPU
+	// has no room for. nil (no perf monitor or no store) disables the check.
+	vramOracle := newVRAMOracle(perfMon, st, proxylog)
+
 	switch cfg.Routing.Router.Use {
 	case "matrix":
-		local, err = router.NewMatrix(cfg, proxylog, upstreamlog)
+		local, err = router.NewMatrix(cfg, proxylog, upstreamlog, vramOracle)
 		if err != nil {
 			return nil, fmt.Errorf("creating matrix router: %w", err)
 		}
 	default: // "group"
-		local, err = router.NewGroup(cfg, proxylog, upstreamlog)
+		local, err = router.NewGroup(cfg, proxylog, upstreamlog, vramOracle)
 		if err != nil {
 			return nil, fmt.Errorf("creating group router: %w", err)
 		}

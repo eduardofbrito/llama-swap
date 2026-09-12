@@ -542,6 +542,12 @@
                         "default": 0,
                         "description": "Overrides allowed number of active parallel requests to a model. 0 uses internal default of 10. >0 overrides default. Requests exceeding limit get HTTP 429."
                     },
+                    "vramMB": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "How much GPU memory (MB) this model needs to load. The declared requirement, which wins over the value llama-swap measured on the model's last successful load. Only consulted when routing.scheduler.settings.fifo.vramCheck is on; 0 means not declared."
+                    },
                     "manualOnly": {
                         "type": "boolean",
                         "default": false,
@@ -849,6 +855,21 @@
                                 "fifo": {
                                     "type": "object",
                                     "properties": {
+                                        "vramCheck": {
+                                            "type": "boolean",
+                                            "default": false,
+                                            "description": "Refuse to start a model when the GPU it would load onto does not have enough free memory, instead of letting the load fail inside the runtime. Exists for GPUs llama-swap does not own: another process can hold memory the router knows nothing about. A model's requirement is models.*.vramMB when declared, otherwise the value measured on its last successful load; a model with neither is always admitted."
+                                        },
+                                        "vramMarginPct": {
+                                            "type": "integer",
+                                            "default": 5,
+                                            "description": "Headroom kept free on top of a model's VRAM requirement, as a percentage of it. Runtimes allocate more than the weights (KV cache growth, fragmentation, CUDA context). A negative value disables the margin. Only used when vramCheck is on."
+                                        },
+                                        "evictBeyondPoolOnPressure": {
+                                            "type": "boolean",
+                                            "default": false,
+                                            "description": "When a load does not fit, give up the evictions recentPoolSize was holding back rather than refusing the request. Trades the pool's retention for availability. With it off (the default) the pool is honoured and the request gets an HTTP 503 with error code insufficient_vram."
+                                        },
                                         "recentPoolSize": {
                                             "type": "integer",
                                             "minimum": 0,

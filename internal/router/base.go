@@ -50,6 +50,9 @@ type baseRouter struct {
 	// upstreamlog captures child process output for rebuilt processes during
 	// a surgical refresh.
 	upstreamlog *logmon.Monitor
+	// vram answers whether a model's GPU has room for it before a swap
+	// starts. nil (no oracle wired) disables the check.
+	vram *vramGuard
 	// processes is the live model->process map, read via processesAt(). Like
 	// config it is swapped atomically (copy-on-write) by a refresh, so the
 	// map a running request captured stays consistent for its whole life.
@@ -100,6 +103,7 @@ func newBaseRouter(
 	processes map[string]process.Process,
 	logger *logmon.Monitor,
 	upstreamlog *logmon.Monitor,
+	oracle VRAMOracle,
 	planner scheduler.Swapper,
 ) (*baseRouter, error) {
 	if upstreamlog == nil {
@@ -112,6 +116,7 @@ func newBaseRouter(
 		name:        name,
 		logger:      logger,
 		upstreamlog: upstreamlog,
+		vram:        newVRAMGuard(conf, oracle),
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 		procCtx:     procCtx,
@@ -217,6 +222,7 @@ func (b *baseRouter) handleRefreshModel(req refreshModelReq) error {
 	//    (nothing may keep the about-to-be-stopped process) and resync its
 	//    per-model concurrency limit.
 	b.config.Store(&newCfg)
+	b.vram.update(newCfg)
 	b.schedule.OnModelReload(model)
 	b.schedule.UpdateModel(model, mc, !exists)
 
@@ -332,6 +338,11 @@ func (b *baseRouter) ModelManual(modelID string) (bool, bool) {
 	return ok && mc.ManualOnly, ok
 }
 
+// VRAMShortfall implements scheduler.Effects.
+func (b *baseRouter) VRAMShortfall(modelID, device string, evict []string) int {
+	return b.vram.shortfallMB(modelID, device, evict)
+}
+
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
 func (b *baseRouter) StartSwap(modelID string, evict []string, opts process.Options) {
 	go b.doSwap(modelID, evict, opts)
@@ -421,6 +432,11 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 	// The WithOptions variant applies any per-load options (a GPU override);
 	// it falls back to the plain EnsureReady when a process does not implement
 	// optional options, so the behaviour is identical to before in that case.
+	// Baseline for the VRAM measurement, taken after the evictions have
+	// completed and before the target starts, so the rise in used memory is
+	// attributable to this model alone.
+	beforeMem := b.vram.deviceSnapshot()
+
 	target := b.processesAt()[modelID]
 	var err error
 	if opt, ok := target.(process.ProcessWithOptions); ok {
@@ -432,6 +448,10 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		// Quiet during shutdown: every in-flight swap fails at once there, and
 		// that is expected rather than worth a warning per model.
 		b.logger.Warnf("%s: starting %s failed: %v", b.name, modelID, err)
+	}
+	if err == nil {
+		// Only a successful load says anything about what the model needs.
+		b.vram.observeLoad(modelID, opts.GpuOverride, beforeMem)
 	}
 
 	select {

@@ -61,6 +61,14 @@ type fakeEffects struct {
 	serveResult  map[string]bool                 // GrantServe return per model (default true)
 	lastServeReq HandlerReq
 
+	// vramShortfall is the MB the fake reports missing per model; absent means
+	// there is room, which is the default so existing tests are unaffected.
+	vramShortfall map[string]int
+	// vramShortfallFor, when set, overrides the table and lets a test answer
+	// differently depending on the eviction set it is handed.
+	vramShortfallFor func(modelID string, evict []string) int
+	vramCalls        []string
+
 	starts []startRec
 	grants []grantRec
 	stops  []stopRec
@@ -71,7 +79,17 @@ func newFakeEffects() *fakeEffects {
 		states:      map[string]process.ProcessState{},
 		manual:      map[string]bool{},
 		serveResult: map[string]bool{},
+
+		vramShortfall: map[string]int{},
 	}
+}
+
+func (f *fakeEffects) VRAMShortfall(modelID, device string, evict []string) int {
+	f.vramCalls = append(f.vramCalls, modelID)
+	if f.vramShortfallFor != nil {
+		return f.vramShortfallFor(modelID, evict)
+	}
+	return f.vramShortfall[modelID]
 }
 
 func (f *fakeEffects) ModelState(modelID string) (process.ProcessState, bool) {
@@ -1215,5 +1233,134 @@ func TestFIFO_ForgetModelDropsFromRecency(t *testing.T) {
 	}
 	if len(s.recentPool) != 2 {
 		t.Errorf("recentPool = %v, want the other two entries kept", s.recentPool)
+	}
+}
+
+// newVRAMFIFO builds a FIFO with the VRAM check exercised through the fake
+// effects: the planner's full eviction set is `full`, and the pool is sized so
+// that it holds part of it back.
+func newVRAMFIFO(poolSize int, evictBeyond bool, eff *fakeEffects, full map[string][]string) *FIFO {
+	cfg := config.FifoConfig{RecentPoolSize: poolSize, EvictBeyondPoolOnPressure: evictBeyond}
+	return NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{evict: full}, cfg, nil, eff)
+}
+
+// TestFIFO_VRAMShortfallRefusesLoad is behaviour (b): with no room on the GPU
+// the request is refused with a 503 rather than starting a load that would
+// fail inside the runtime, and no swap is started.
+func TestFIFO_VRAMShortfallRefusesLoad(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["m"] = process.StateStopped
+	eff.vramShortfall["m"] = 4096
+
+	s := newVRAMFIFO(0, false, eff, nil)
+	r := req("m")
+	s.OnRequest(r)
+
+	if len(eff.starts) != 0 {
+		t.Errorf("started %d swaps; a refused load must not start one", len(eff.starts))
+	}
+	// Past admit(), a refusal is delivered through GrantError, which is what
+	// the baseRouter turns into the HTTP response.
+	if len(eff.grants) != 1 {
+		t.Fatalf("grants = %d, want 1", len(eff.grants))
+	}
+	var vramErr swaputil.VRAMUnavailableError
+	if !errors.As(eff.grants[0].err, &vramErr) {
+		t.Fatalf("err = %v, want VRAMUnavailableError", eff.grants[0].err)
+	}
+	if vramErr.ShortfallMB != 4096 {
+		t.Errorf("ShortfallMB = %d, want 4096", vramErr.ShortfallMB)
+	}
+	if vramErr.StatusCode() != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", vramErr.StatusCode())
+	}
+	// The reservation taken by admit() must be released on the way out.
+	if n := s.reserved["m"]; n != 0 {
+		t.Errorf("reserved[m] = %d after a refusal, want 0", n)
+	}
+}
+
+// TestFIFO_VRAMCheckSkippedWhenModelReady: a model that is already loaded
+// holds its memory, so re-checking it would double-count and wrongly refuse.
+func TestFIFO_VRAMCheckSkippedWhenModelReady(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["m"] = process.StateReady
+	eff.vramShortfall["m"] = 99999
+
+	s := newVRAMFIFO(0, false, eff, nil)
+	r := req("m")
+	s.OnRequest(r)
+
+	if len(eff.grants) != 1 {
+		t.Fatalf("grants = %d, want 1; a ready model must be served regardless of the check", len(eff.grants))
+	}
+}
+
+// TestFIFO_EvictBeyondPoolOnPressure is the controlled fallback: when the pool
+// held an eviction back and that is why the model does not fit, giving up the
+// pool's retention lets the load proceed.
+func TestFIFO_EvictBeyondPoolOnPressure(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["m"] = process.StateStopped
+	eff.states["old"] = process.StateReady
+	// Short with the pool-limited set (empty), fine with the full set.
+	eff.vramShortfallFor = func(_ string, evict []string) int {
+		if len(evict) == 0 {
+			return 4096
+		}
+		return 0
+	}
+
+	// Pool of 2 holds "old" back; the planner's full set evicts it.
+	s := newVRAMFIFO(2, true, eff, map[string][]string{"m": {"old"}})
+	s.markModelUsed("old")
+
+	r := req("m")
+	s.OnRequest(r)
+
+	if len(eff.starts) != 1 {
+		t.Fatalf("starts = %d, want 1; the fallback must let the load proceed", len(eff.starts))
+	}
+	if got := eff.starts[0].evict; len(got) != 1 || got[0] != "old" {
+		t.Errorf("evict = %v, want [old]; the fallback must give up the pool's retention", got)
+	}
+}
+
+// TestFIFO_EvictBeyondPoolStillRefusesWhenHopeless: when even the swapper's
+// full eviction set does not free enough, something outside llama-swap holds
+// the memory and the request is refused even with the fallback on.
+func TestFIFO_EvictBeyondPoolStillRefusesWhenHopeless(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["m"] = process.StateStopped
+	eff.vramShortfallFor = func(_ string, _ []string) int { return 8192 }
+
+	s := newVRAMFIFO(2, true, eff, map[string][]string{"m": {"old"}})
+	s.markModelUsed("old")
+
+	s.OnRequest(req("m"))
+
+	if len(eff.starts) != 0 {
+		t.Errorf("started %d swaps; a hopeless load must still be refused", len(eff.starts))
+	}
+	if len(eff.grants) != 1 {
+		t.Fatalf("grants = %d, want 1", len(eff.grants))
+	}
+	var vramErr swaputil.VRAMUnavailableError
+	if !errors.As(eff.grants[0].err, &vramErr) {
+		t.Fatalf("err = %v, want VRAMUnavailableError", eff.grants[0].err)
+	}
+}
+
+// TestFIFO_VRAMCheckOffAdmitsEverything pins the default: with no shortfall
+// reported the check is invisible, which is how every existing setup behaves.
+func TestFIFO_VRAMCheckOffAdmitsEverything(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["m"] = process.StateStopped
+
+	s := newVRAMFIFO(0, false, eff, nil)
+	s.OnRequest(req("m"))
+
+	if len(eff.starts) != 1 {
+		t.Errorf("starts = %d, want 1", len(eff.starts))
 	}
 }

@@ -98,6 +98,12 @@ type Effects interface {
 	// opts carries optional per-load parameters (for example a GPU override)
 	// that are applied when the target process is started.
 	StartSwap(modelID string, evict []string, opts process.Options)
+	// VRAMShortfall reports how much GPU memory (MB) is still missing for
+	// modelID to load after the models in evict are stopped, on the device the
+	// request targets ("" to use the model's configured GPU). It returns 0
+	// when there is room, when the check is off, or whenever the answer is not
+	// trustworthy — the scheduler admits the model in all of those cases.
+	VRAMShortfall(modelID, device string, evict []string) int
 	// GrantError responds to a caller with an error.
 	GrantError(req HandlerReq, err error)
 	// GrantServe hands a caller the wrapped handler for modelID and reports

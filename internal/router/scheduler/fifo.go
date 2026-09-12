@@ -157,7 +157,18 @@ func (s *FIFO) OnRequest(req HandlerReq) {
 		return
 	}
 
-	// (6) Start a new (possibly parallel) swap.
+	// (6) Refuse a load the GPU has no room for, rather than letting it fail
+	// deep inside the runtime minutes later.
+	evict, short, ok := s.admitVRAM(req.Model, req.GpuOverride, evict, running, state)
+	if !ok {
+		s.logger.Warnf("%s: refusing to load %s, short %d MB of GPU memory", s.name, req.Model, short)
+		// admit() already reserved a slot for this request; grantError
+		// releases it on the way out.
+		s.grantError(req, swaputil.VRAMUnavailableError{ModelID: req.Model, ShortfallMB: short})
+		return
+	}
+
+	// (7) Start a new (possibly parallel) swap.
 	s.logger.Debugf("%s: starting swap for model %s, evicting %v", s.name, req.Model, evict)
 	s.startSwap(req, evict, running)
 }
@@ -332,6 +343,41 @@ func (s *FIFO) UpdateModel(model string, mc config.ModelConfig, remove bool) {
 		limit = mc.ConcurrencyLimit
 	}
 	s.limits[model] = limit
+}
+
+// admitVRAM decides whether a swap that would load target may start, given the
+// eviction set the pool settled on. It returns the eviction set to use and
+// ok=false when the load must be refused.
+//
+// When the GPU is short, evictBeyondPoolOnPressure decides what happens: with
+// it off (the default) the request is refused, which keeps the pool's
+// retention and reports capacity honestly; with it on, the pool's held-back
+// evictions are given up so the load can proceed, and the request is only
+// refused when even the swapper's full eviction set does not free enough.
+//
+// state is the target's current process state: a model that is already ready
+// has its memory, and re-checking it would double-count what it already holds.
+func (s *FIFO) admitVRAM(target, device string, evict, running []string, state process.ProcessState) ([]string, int, bool) {
+	if state == process.StateReady {
+		return evict, 0, true
+	}
+	short := s.effects.VRAMShortfall(target, device, evict)
+	if short == 0 {
+		return evict, 0, true
+	}
+	if !s.cfg.EvictBeyondPoolOnPressure {
+		return evict, short, false
+	}
+
+	full := s.planner.EvictionFor(target, running)
+	if s.effects.VRAMShortfall(target, device, full) > 0 {
+		// Even giving up the whole pool does not free enough: something
+		// outside llama-swap is holding the memory.
+		return evict, short, false
+	}
+	s.logger.Infof("%s: %s is short %d MB; evicting beyond the recent pool to make room (evictBeyondPoolOnPressure)",
+		s.name, target, short)
+	return full, 0, true
 }
 
 // markModelUsed moves modelID to the front of the recency list. See the
@@ -588,6 +634,12 @@ func (s *FIFO) drainQueue() {
 		}
 		if collidesWith(req.Model, evict, s.active) {
 			remaining = append(remaining, req)
+			continue
+		}
+		evict, short, admitted := s.admitVRAM(req.Model, req.GpuOverride, evict, running, state)
+		if !admitted {
+			s.logger.Warnf("%s: refusing queued load of %s, short %d MB of GPU memory", s.name, req.Model, short)
+			s.grantError(req, swaputil.VRAMUnavailableError{ModelID: req.Model, ShortfallMB: short})
 			continue
 		}
 		if conflictsWithInFlight(evict, s.inFlight) {

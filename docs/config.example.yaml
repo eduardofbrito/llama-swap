@@ -435,6 +435,15 @@ models:
     # - recommended to be omitted and the default used
     concurrencyLimit: 0
 
+    # vramMB: how much GPU memory (MB) this model needs to load
+    # - optional, default: 0 (not declared)
+    # - only consulted when routing.scheduler.settings.fifo.vramCheck is on
+    # - this is the DECLARED requirement and wins over the value llama-swap
+    #   measured on the model's last successful load
+    # - declare it for models whose load must never be attempted on a GPU that
+    #   cannot hold them; leave it out to let llama-swap learn the number
+    vramMB: 0
+
     # manualOnly: never load this model on demand
     # - optional, default: false
     # - an inference request for an unloaded manualOnly model gets an immediate
@@ -722,6 +731,38 @@ routing:
         #   keeps loaded is exactly what the swapper wanted unloaded to free
         #   capacity. Set it to how many models actually fit in VRAM
         recentPoolSize: 0
+
+        # vramCheck: refuse a load the GPU has no room for
+        # - optional, default: false
+        # - llama-swap does not necessarily own the GPU. A training job, a
+        #   second llama-swap or a desktop session can hold memory it knows
+        #   nothing about, so "every model I evicted is stopped" is not the
+        #   same as "the memory is free"
+        # - with this on, such a request gets an immediate HTTP 503
+        #   (insufficient_vram) instead of a load that fails deep inside the
+        #   runtime minutes later
+        # - a model's requirement is models.*.vramMB when declared, otherwise
+        #   the value measured on its last successful load. A model with
+        #   NEITHER is always admitted: refusing on ignorance would be worse
+        #   than not checking at all
+        vramCheck: false
+
+        # vramMarginPct: headroom kept on top of the requirement, in percent
+        # - optional, default: 5
+        # - runtimes allocate more than the weights (KV cache growth,
+        #   fragmentation, CUDA context), and one measurement is not a ceiling
+        # - a negative value disables the margin
+        vramMarginPct: 5
+
+        # evictBeyondPoolOnPressure: let a load that does not fit give up the
+        # evictions recentPoolSize was holding back, instead of being refused
+        # - optional, default: false
+        # - off: the pool is honoured and the request gets a 503. Capacity
+        #   stays predictable and the pool keeps what it promised
+        # - on: availability wins over retention. The request is still refused
+        #   when even evicting everything does not free enough — that means
+        #   something outside llama-swap is holding the memory
+        evictBeyondPoolOnPressure: false
 
         # priority: a dictionary of model ID -> priority
         # - optional, default: empty dictionary

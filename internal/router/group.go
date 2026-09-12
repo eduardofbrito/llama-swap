@@ -12,7 +12,7 @@ type Group struct {
 	*baseRouter
 }
 
-func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group, error) {
+func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor, oracle VRAMOracle) (*Group, error) {
 	modelToGroup := make(map[string]string)
 	for gid, gcfg := range conf.Routing.Router.Settings.Groups {
 		for _, mid := range gcfg.Members {
@@ -29,7 +29,7 @@ func NewGroup(conf config.Config, proxylog, upstreamlog *logmon.Monitor) (*Group
 	}
 
 	processes := make(map[string]process.Process, len(modelToGroup))
-	base, err := newBaseRouter("group", conf, processes, proxylog, upstreamlog, swapper)
+	base, err := newBaseRouter("group", conf, processes, proxylog, upstreamlog, oracle, swapper)
 	if err != nil {
 		return nil, fmt.Errorf("creating base router: %w", err)
 	}

@@ -100,6 +100,13 @@ type ModelConfig struct {
 	// Requests served while the model is already loaded still succeed.
 	ManualOnly bool `yaml:"manualOnly"`
 
+	// VramMB is how much GPU memory (in MB) this model needs to load. It is
+	// the declared requirement and wins over the value llama-swap measured on
+	// the model's last successful load. Only consulted when
+	// routing.scheduler.settings.fifo.vramCheck is on; 0 means "not declared",
+	// which falls back to the measured value.
+	VramMB int `yaml:"vramMB"`
+
 	// Model filters see issue #174
 	Filters ModelFilters `yaml:"filters"`
 

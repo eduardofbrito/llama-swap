@@ -553,3 +553,51 @@ func scanActivity(scanner activityScanner) (ActivityLogEntry, error) {
 	}
 	return entry, nil
 }
+
+// ModelVRAM is a model's measured VRAM requirement, in MB, as observed on its
+// last successful load.
+type ModelVRAM struct {
+	Model   string    `json:"model"`
+	VramMB  int       `json:"vram_mb"`
+	Updated time.Time `json:"ts_updated"`
+}
+
+// RecordModelVRAM stores the VRAM a model needed on a successful load. It
+// replaces any previous measurement: the most recent load reflects the model's
+// current command line, quantization and context size, and an older reading
+// says nothing useful once any of those changed.
+func (s *Store) RecordModelVRAM(ctx context.Context, model string, vramMB int) error {
+	if model == "" || vramMB <= 0 {
+		return fmt.Errorf("invalid model vram measurement: model=%q vramMB=%d", model, vramMB)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO model_vram (model, vram_mb, ts_updated) VALUES (?, ?, ?)
+		 ON CONFLICT(model) DO UPDATE SET vram_mb = excluded.vram_mb, ts_updated = excluded.ts_updated`,
+		model, vramMB, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("recording model vram: %w", err)
+	}
+	return nil
+}
+
+// ModelVRAMAll returns every measured VRAM requirement, keyed by model ID. The
+// router loads this once at construction and keeps it in memory: the admission
+// check runs on the scheduler's hot path and must not touch the database.
+func (s *Store) ModelVRAMAll(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT model, vram_mb FROM model_vram`)
+	if err != nil {
+		return nil, fmt.Errorf("reading model vram: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]int)
+	for rows.Next() {
+		var model string
+		var vramMB int
+		if err := rows.Scan(&model, &vramMB); err != nil {
+			return nil, fmt.Errorf("scanning model vram: %w", err)
+		}
+		out[model] = vramMB
+	}
+	return out, rows.Err()
+}

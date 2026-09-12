@@ -181,3 +181,34 @@ func (e ManualLoadError) Body() []byte {
 		"manual_load_required",
 	).JSON()
 }
+
+// VRAMUnavailableError is an HTTPError for a 503 refusal to start a model the
+// GPU has no room for. The router checks free device memory before a swap
+// because llama-swap does not necessarily own the GPU: another process can
+// hold memory it knows nothing about, and without the check that shows up as a
+// load failing deep inside the runtime, minutes later. Refusing up front lets
+// a client fail over immediately, the same way manualOnly does.
+type VRAMUnavailableError struct {
+	ModelID     string
+	ShortfallMB int
+}
+
+func (e VRAMUnavailableError) Error() string {
+	return fmt.Sprintf("not enough GPU memory for model %s (short by %d MB)", e.ModelID, e.ShortfallMB)
+}
+
+func (e VRAMUnavailableError) StatusCode() int { return http.StatusServiceUnavailable }
+
+func (e VRAMUnavailableError) Header() http.Header {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	return h
+}
+
+func (e VRAMUnavailableError) Body() []byte {
+	return NewErrorEnvelope(
+		e.StatusCode(),
+		fmt.Sprintf("model %s cannot be loaded: its GPU is short %d MB of free memory, possibly used outside llama-swap", e.ModelID, e.ShortfallMB),
+		"insufficient_vram",
+	).JSON()
+}
