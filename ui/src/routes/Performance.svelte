@@ -336,8 +336,11 @@
     const datasets = [];
     let colorIdx = 0;
     for (const [id, entry] of byId) {
+      // Always show the GPU index (CUDA_VISIBLE_DEVICES / nvidia-smi index)
+      // next to the name — models are pinned to specific GPU indices.
+      const label = entry.name ? `${entry.name} (GPU ${id})` : `GPU ${id}`;
       datasets.push({
-        label: entry.name || `GPU ${id}`,
+        label,
         data: entry.values,
         borderColor: COLORS[colorIdx % COLORS.length],
       });
