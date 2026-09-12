@@ -627,6 +627,32 @@ routing:
             - "modelA"
             - "modelB"
 
+        # gpu-pool: a group that places its members across specific GPUs.
+        "gpu-pool":
+          # gpus: the devices this group schedules its members onto
+          # - optional, default: empty (placement comes from each model's env)
+          # - ONE MEMBER PER DEVICE. A member takes a free device when it
+          #   loads; once every device is busy, the least recently used member
+          #   is unloaded to free the device the new one starts on
+          # - the members' recentPoolSize is set to the number of devices, so
+          #   the scheduler keeps exactly that many of them loaded
+          # - cannot be combined with persistent: a persistent group is never
+          #   evicted, so its members could never release a device
+          # - an explicit per-request GPU (the llama-swap-gpu query parameter
+          #   or the UI's selector) overrides the placement for that load
+          gpus: ["0", "1"]
+
+          # deviceEnv: the variable the assigned device is exported as
+          # - optional, default: CUDA_VISIBLE_DEVICES
+          # - set it for runtimes that read a different variable, e.g.
+          #   HIP_VISIBLE_DEVICES on ROCm
+          deviceEnv: CUDA_VISIBLE_DEVICES
+
+          members:
+            - "pool-modelA"
+            - "pool-modelB"
+            - "pool-modelC"
+
         # forever: a persistent group that other groups can never unload.
         "forever":
           # persistent: other groups cannot unload this group's members

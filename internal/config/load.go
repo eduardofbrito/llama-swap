@@ -259,6 +259,34 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 	config.Routing.Router.Settings.Matrix = config.Matrix
 	config.Routing.Router.Settings.Groups = config.Groups
 
+	// A group that manages devices keeps one member per device loaded, so its
+	// members' recent-model pool size is the device count regardless of the
+	// global recentPoolSize. Resolved here, once, rather than in the hot path.
+	for groupID, groupConfig := range config.Groups {
+		if len(groupConfig.GPUs) == 0 {
+			continue
+		}
+		if groupConfig.Persistent {
+			return Config{}, fmt.Errorf("group %s: gpus cannot be combined with persistent; a persistent group is never evicted, so its members can never release a device for another member", groupID)
+		}
+		seen := make(map[string]bool, len(groupConfig.GPUs))
+		for _, device := range groupConfig.GPUs {
+			if strings.TrimSpace(device) == "" {
+				return Config{}, fmt.Errorf("group %s: gpus contains an empty device", groupID)
+			}
+			if seen[device] {
+				return Config{}, fmt.Errorf("group %s: device %s is listed twice in gpus", groupID, device)
+			}
+			seen[device] = true
+		}
+		if config.Routing.Scheduler.Settings.Fifo.PoolSize == nil {
+			config.Routing.Scheduler.Settings.Fifo.PoolSize = make(map[string]int)
+		}
+		for _, member := range groupConfig.Members {
+			config.Routing.Scheduler.Settings.Fifo.PoolSize[member] = len(groupConfig.GPUs)
+		}
+	}
+
 	if config.Routing.Scheduler.Use == "" {
 		config.Routing.Scheduler.Use = "fifo"
 	}

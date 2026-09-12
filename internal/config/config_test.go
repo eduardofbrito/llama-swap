@@ -1894,3 +1894,91 @@ routing:
 	require.NoError(t, err)
 	assert.Equal(t, 5, cfg.Routing.Scheduler.Settings.Fifo.Priority["gemma"])
 }
+
+func TestConfig_GroupGPUs(t *testing.T) {
+	t.Run("resolves the members' pool size to the device count", func(t *testing.T) {
+		cfg, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a: {proxy: "http://127.0.0.1:1"}
+  b: {proxy: "http://127.0.0.1:2"}
+  c: {proxy: "http://127.0.0.1:3"}
+groups:
+  pair:
+    members: [a, b]
+    gpus: ["0", "1"]
+  other:
+    members: [c]
+`))
+		if err != nil {
+			t.Fatalf("LoadConfigFromReader: %v", err)
+		}
+		fifo := cfg.Routing.Scheduler.Settings.Fifo
+		if got := fifo.PoolSizeFor("a"); got != 2 {
+			t.Errorf("PoolSizeFor(a) = %d, want 2 (the group's device count)", got)
+		}
+		if got := fifo.PoolSizeFor("b"); got != 2 {
+			t.Errorf("PoolSizeFor(b) = %d, want 2", got)
+		}
+		// A model outside a device-managing group falls back to the global.
+		if got := fifo.PoolSizeFor("c"); got != fifo.RecentPoolSize {
+			t.Errorf("PoolSizeFor(c) = %d, want the global %d", got, fifo.RecentPoolSize)
+		}
+	})
+
+	t.Run("rejects gpus on a persistent group", func(t *testing.T) {
+		_, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a: {proxy: "http://127.0.0.1:1"}
+groups:
+  g:
+    members: [a]
+    persistent: true
+    gpus: ["0"]
+`))
+		if err == nil {
+			t.Fatal("expected an error: a persistent group is never evicted, so its members can never release a device")
+		}
+		if !strings.Contains(err.Error(), "persistent") {
+			t.Errorf("error = %v, want it to explain the persistent conflict", err)
+		}
+	})
+
+	t.Run("rejects a duplicate device", func(t *testing.T) {
+		_, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a: {proxy: "http://127.0.0.1:1"}
+groups:
+  g:
+    members: [a]
+    gpus: ["0", "0"]
+`))
+		if err == nil {
+			t.Fatal("expected an error for a device listed twice")
+		}
+	})
+
+	t.Run("rejects an empty device", func(t *testing.T) {
+		_, err := LoadConfigFromReader(strings.NewReader(`
+models:
+  a: {proxy: "http://127.0.0.1:1"}
+groups:
+  g:
+    members: [a]
+    gpus: ["0", ""]
+`))
+		if err == nil {
+			t.Fatal("expected an error for an empty device entry")
+		}
+	})
+
+	t.Run("defaults deviceEnv to CUDA_VISIBLE_DEVICES", func(t *testing.T) {
+		g := GroupConfig{GPUs: []string{"0"}}
+		if got := g.Device(); got != DefaultDeviceEnv {
+			t.Errorf("Device() = %q, want %q", got, DefaultDeviceEnv)
+		}
+		g.DeviceEnv = "HIP_VISIBLE_DEVICES"
+		if got := g.Device(); got != "HIP_VISIBLE_DEVICES" {
+			t.Errorf("Device() = %q, want the configured value", got)
+		}
+	})
+}

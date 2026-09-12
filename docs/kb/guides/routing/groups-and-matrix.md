@@ -2,9 +2,9 @@
 title: Running several models at once with groups and matrix
 summary: Choosing between the group and matrix routers, and how each decides what gets unloaded.
 category: guides
-tags: [routing, groups, matrix, concurrency, swap, vram]
-config_keys: [routing, routing.router.use, routing.router.settings.groups, routing.router.settings.matrix]
-updated: 2026-08-25
+tags: [routing, groups, matrix, concurrency, swap, vram, gpus, multi-gpu, device-placement, cuda-visible-devices]
+config_keys: [routing, routing.router.use, routing.router.settings.groups, routing.router.settings.matrix, routing.scheduler.settings.fifo.recentPoolSize]
+updated: 2026-09-12
 ---
 
 # Running several models at once: groups and matrix
@@ -149,3 +149,68 @@ Higher numbers are serviced first. Models default to 0.
 
 - `reference/config/routing` — the full annotated section
 - `guides/model-runtime/ttl-and-unloading` — reclaiming VRAM from idle models
+
+## Placing a group's models across several GPUs
+
+A group's `gpus` list makes it schedule its members across devices, one member
+per device:
+
+```yaml
+routing:
+  router:
+    use: group
+    settings:
+      groups:
+        gpu-pool:
+          gpus: ["0", "1"]
+          members: [model-a, model-b, model-c]
+```
+
+Three models, two GPUs. A member takes a free device when it loads; once both
+are busy, requesting the third unloads the least recently used member and
+starts on the device that frees. The assigned device reaches the process as
+`CUDA_VISIBLE_DEVICES`, overriding whatever the model's own `env` sets — use
+`deviceEnv` for a runtime that reads something else, such as
+`HIP_VISIBLE_DEVICES` on ROCm.
+
+You do not set `recentPoolSize` for these models: the group's device count is
+their pool size, because "keep one member per device loaded" and "keep N models
+loaded" are the same statement.
+
+How placement decides:
+
+- **Occupancy comes from live process state**, not from bookkeeping. A member
+  that exits on its own — a TTL expiry, a crash — releases its device with
+  nothing to clean up.
+- **The models this swap is about to evict count as free.** That is what makes
+  room for the incoming member, and it is why the pool size has to equal the
+  device count.
+- **A member goes back to the device it last ran on** when that device is free,
+  which keeps per-device caches (compile caches, NUMA placement) warm.
+- **The choice is made on the router's run loop**, not inside the swap
+  goroutine: two parallel swaps in the same group would otherwise race for the
+  same free GPU.
+
+### What overrides what
+
+An explicit per-request GPU wins over the group's placement — the
+`llama-swap-gpu` query parameter, or picking a GPU in the dashboard. Someone
+who chose a device asked for that device, and silently overriding it would make
+the control a lie. The group places every load that does not name one.
+
+### Failure modes
+
+`persistent: true` and `gpus` are rejected together at config load: a
+persistent group is never evicted, so its members could never release a device
+for the next one.
+
+If every device is somehow busy at placement time, the model starts with its
+own configured `env` and a warning is logged. The pool sizing is what prevents
+that, so treat the warning as a real bug report rather than noise.
+
+Devices listed here are indices in the runtime's own numbering, the same values
+you would put in `CUDA_VISIBLE_DEVICES` by hand. They are not validated against
+the host's actual GPUs — a typo yields a model that fails to start on a device
+that does not exist. `vramCheck` (see
+`guides/routing/capacity-and-queues`) catches the related case where the device
+exists but has no room.

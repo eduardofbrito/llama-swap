@@ -107,6 +107,16 @@
                         "default": false,
                         "description": "Prevents other groups from unloading the models in this group. Does not affect individual model behaviour."
                     },
+                    "gpus": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "description": "Devices this group schedules its members onto, one member per device. A member takes a free device when it loads; once every device is busy the least recently used member is unloaded to free the one the new member starts on. Sets the members' recent-model pool size to the number of devices. Cannot be combined with persistent, whose members are never evicted and so can never release a device."
+                    },
+                    "deviceEnv": {
+                        "type": "string",
+                        "default": "CUDA_VISIBLE_DEVICES",
+                        "description": "Environment variable the assigned device is handed to the process as. Only used together with gpus."
+                    },
                     "members": {
                         "type": "array",
                         "items": {

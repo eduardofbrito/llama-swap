@@ -727,17 +727,27 @@ func (p *ProcessCommand) ID() string {
 // always wins and no duplicate entry for that variable survives.
 func (p *ProcessCommand) startEnv(opts Options) []string {
 	override := strings.TrimSpace(opts.GpuOverride)
+	key := opts.gpuEnvVar()
 	env := make([]string, 0, len(p.config.Env)+1)
 	for _, e := range p.config.Env {
-		if override != "" && strings.HasPrefix(e, GPUEnvVar+"=") {
+		if override != "" && strings.HasPrefix(e, key+"=") {
 			continue
 		}
 		env = append(env, e)
 	}
 	if override != "" {
-		env = append(env, GPUEnvVar+"="+override)
+		env = append(env, key+"="+override)
 	}
 	return env
+}
+
+// gpuEnvVar is the environment variable a GPU selection is applied as,
+// defaulting to CUDA_VISIBLE_DEVICES.
+func (o Options) gpuEnvVar() string {
+	if v := strings.TrimSpace(o.GpuEnvVar); v != "" {
+		return v
+	}
+	return GPUEnvVar
 }
 
 // DefaultGPU returns the model's configured GPU: the value of CUDA_VISIBLE_DEVICES

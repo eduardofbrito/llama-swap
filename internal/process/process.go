@@ -30,6 +30,12 @@ type Options struct {
 	// selector chooses which GPU a model is loaded onto; when empty the model
 	// uses the GPU configured for it.
 	GpuOverride string
+
+	// GpuEnvVar is the environment variable GpuOverride is applied as. Empty
+	// means GPUEnvVar (CUDA_VISIBLE_DEVICES). A group that places its members
+	// across devices sets this from its `deviceEnv`, so a non-CUDA runtime can
+	// be placed with the variable it actually reads.
+	GpuEnvVar string
 }
 
 type Process interface {

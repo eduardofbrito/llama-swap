@@ -53,6 +53,9 @@ type baseRouter struct {
 	// vram answers whether a model's GPU has room for it before a swap
 	// starts. nil (no oracle wired) disables the check.
 	vram *vramGuard
+	// devices places a group's members across the GPUs the group declared.
+	// nil when no group declares any, which is the common case.
+	devices *deviceAssigner
 	// processes is the live model->process map, read via processesAt(). Like
 	// config it is swapped atomically (copy-on-write) by a refresh, so the
 	// map a running request captured stays consistent for its whole life.
@@ -117,6 +120,7 @@ func newBaseRouter(
 		logger:      logger,
 		upstreamlog: upstreamlog,
 		vram:        newVRAMGuard(conf, oracle),
+		devices:     newDeviceAssigner(conf),
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 		procCtx:     procCtx,
@@ -223,6 +227,7 @@ func (b *baseRouter) handleRefreshModel(req refreshModelReq) error {
 	//    per-model concurrency limit.
 	b.config.Store(&newCfg)
 	b.vram.update(newCfg)
+	b.devices.update(newCfg)
 	b.schedule.OnModelReload(model)
 	b.schedule.UpdateModel(model, mc, !exists)
 
@@ -339,13 +344,63 @@ func (b *baseRouter) ModelManual(modelID string) (bool, bool) {
 }
 
 // VRAMShortfall implements scheduler.Effects.
+//
+// When the request pinned no device and the model belongs to a group that
+// places its members, the check has to look at the device the model will
+// actually land on — not the one its own env names, which the group's
+// placement is about to override.
 func (b *baseRouter) VRAMShortfall(modelID, device string, evict []string) int {
+	if device == "" && b.devices.manages(modelID) {
+		if placed, ok := b.devices.peek(modelID, evict, b.processDeviceFunc()); ok {
+			device = placed
+		}
+	}
 	return b.vram.shortfallMB(modelID, device, evict)
 }
 
 // StartSwap implements scheduler.Effects, launching the swap goroutine.
+//
+// Device placement happens here, on the run loop, rather than inside doSwap:
+// two concurrent swaps for members of the same group would otherwise race for
+// the same free GPU. Deciding it here serializes the choice, and the swap
+// goroutine only starts the process the run loop already placed.
 func (b *baseRouter) StartSwap(modelID string, evict []string, opts process.Options) {
+	opts.GpuOverride = b.placeOnDevice(modelID, evict, opts.GpuOverride)
+	if opts.GpuOverride != "" && opts.GpuEnvVar == "" {
+		// A group may place its members with a variable other than
+		// CUDA_VISIBLE_DEVICES; a plain request override keeps the default.
+		opts.GpuEnvVar = b.devices.deviceEnvFor(modelID)
+	}
 	go b.doSwap(modelID, evict, opts)
+}
+
+// placeOnDevice returns the GPU the model should load onto: the request's own
+// override when it has one, otherwise the device its group assigns it.
+//
+// An explicit override always wins. Someone who picked a GPU in the UI, or put
+// llama-swap-gpu on a request, asked for that device; silently overriding it
+// with the group's choice would make the control a lie.
+func (b *baseRouter) placeOnDevice(modelID string, evict []string, requested string) string {
+	if requested != "" {
+		if b.devices.manages(modelID) {
+			b.logger.Debugf("%s: %s pinned to %s by the request; its group's placement is skipped",
+				b.name, modelID, requested)
+		}
+		return requested
+	}
+	if !b.devices.manages(modelID) {
+		return ""
+	}
+	device, ok := b.devices.assign(modelID, evict, b.processDeviceFunc())
+	if !ok {
+		// Every device is taken even after this swap's evictions. The pool
+		// size comes from the device count precisely so this cannot happen,
+		// so say so instead of starting the model on whatever its env names.
+		b.logger.Warnf("%s: no free device for %s; starting it with its configured env", b.name, modelID)
+		return ""
+	}
+	b.logger.Debugf("%s: placing %s on device %s", b.name, modelID, device)
+	return device
 }
 
 // GrantError implements scheduler.Effects.

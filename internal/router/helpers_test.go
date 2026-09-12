@@ -308,6 +308,18 @@ func (f *fakeProcess) EnsureReadyWithOptions(ctx context.Context, timeout time.D
 	return f.EnsureReady(ctx, timeout)
 }
 
+// GPU reports the device this fake was last started on, mirroring
+// ProcessCommand: the effective GPU while running, "" once stopped. It is what
+// the device assigner reads occupancy from.
+func (f *fakeProcess) GPU() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state == process.StateStopped || f.state == process.StateShutdown {
+		return ""
+	}
+	return f.lastOptsVal.GpuOverride
+}
+
 // lastOpts returns the Options most recently passed to a WithOptions call.
 func (f *fakeProcess) lastOpts() process.Options {
 	f.mu.Lock()

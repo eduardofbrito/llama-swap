@@ -87,6 +87,36 @@ type GroupConfig struct {
 	Exclusive  bool     `yaml:"exclusive"`
 	Persistent bool     `yaml:"persistent"`
 	Members    []string `yaml:"members"`
+
+	// GPUs are the devices this group schedules its members onto, one member
+	// per device. A member is placed on a free device when it loads; once every
+	// device is busy the least recently used member is unloaded to free the one
+	// the new member starts on.
+	//
+	// The assigned device is handed to the process as DeviceEnv, overriding
+	// whatever the model's own env sets for that variable. Empty (the default)
+	// leaves device placement entirely to each model's env.
+	//
+	// A group with GPUs sets its members' recent-model pool size to the number
+	// of devices, so the scheduler keeps exactly that many members loaded.
+	GPUs []string `yaml:"gpus"`
+
+	// DeviceEnv is the environment variable the assigned device is exported as.
+	// Defaults to DefaultDeviceEnv.
+	DeviceEnv string `yaml:"deviceEnv"`
+}
+
+// DefaultDeviceEnv is the environment variable a group exports its assigned
+// device as when GroupConfig.DeviceEnv is not set.
+const DefaultDeviceEnv = "CUDA_VISIBLE_DEVICES"
+
+// Device returns the environment variable this group hands its assigned device
+// to the process as.
+func (c GroupConfig) Device() string {
+	if c.DeviceEnv == "" {
+		return DefaultDeviceEnv
+	}
+	return c.DeviceEnv
 }
 
 // set default values for GroupConfig
@@ -283,6 +313,22 @@ type FifoConfig struct {
 	// (the default) the pool is honoured and the request gets a 503, which
 	// keeps capacity honest and predictable.
 	EvictBeyondPoolOnPressure bool `yaml:"evictBeyondPoolOnPressure"`
+
+	// PoolSize is the resolved per-model pool size, filled in at load time
+	// from the groups' `gpus` lists: a group that manages N devices keeps N of
+	// its members loaded, whatever the global RecentPoolSize says. Models
+	// absent from the map use RecentPoolSize. Derived, never written by hand.
+	PoolSize map[string]int `yaml:"-"`
+}
+
+// PoolSizeFor returns the recent-model pool size that applies to modelID: its
+// group's device count when the group declares `gpus`, otherwise the global
+// RecentPoolSize.
+func (c FifoConfig) PoolSizeFor(modelID string) int {
+	if n, ok := c.PoolSize[modelID]; ok {
+		return n
+	}
+	return c.RecentPoolSize
 }
 
 // DefaultVramMarginPct is the headroom kept on top of a model's VRAM

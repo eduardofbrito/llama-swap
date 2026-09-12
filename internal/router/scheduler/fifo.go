@@ -428,7 +428,7 @@ func (s *FIFO) evictionFor(target string) (running, evict []string) {
 // room for RecentPoolSize models at once. 0 or 1 disables the pool and leaves
 // every eviction decision to the swapper.
 func (s *FIFO) poolEviction(target string, evict []string) []string {
-	size := s.cfg.RecentPoolSize
+	size := s.cfg.PoolSizeFor(target)
 	if size <= 1 || len(evict) == 0 {
 		return evict
 	}
