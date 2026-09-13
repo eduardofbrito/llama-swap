@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { link } from "svelte-spa-router";
-  import { Gpu as GpuIcon, ArrowUpToLine, ArrowDownToLine } from "@lucide/svelte";
-  import { gpus, models, unloadSingleModel } from "../stores/api";
+  import { Gpu as GpuIcon, ArrowUpToLine, ArrowDownToLine, TriangleAlert } from "@lucide/svelte";
+  import { gpus, models, unloadSingleModel, fetchGpus } from "../stores/api";
+  import { formatGpuMemory, gpuMemoryPct } from "../lib/format";
   import { handleLoadModel } from "../stores/modelLoad";
   import type { GpuInfo, Model } from "../lib/types";
   import { cn } from "$lib/utils.js";
@@ -68,6 +70,59 @@
     }
   }
 
+  // Memory readings change constantly, so the page refreshes them on its own
+  // rather than showing whatever was true when the SSE connection opened.
+  const MEMORY_REFRESH_MS = 5000;
+  onMount(() => {
+    const tick = () => void fetchGpus().catch(() => {});
+    tick();
+    const timer = setInterval(tick, MEMORY_REFRESH_MS);
+    return () => clearInterval(timer);
+  });
+
+  // A GPU with no llama-swap model on it should be empty. Anything above this
+  // is another process: a training job, a second llama-swap, a desktop
+  // session. The floor exists because drivers and compositors hold a little
+  // memory on an otherwise idle card, and flagging that would be noise.
+  const EXTERNAL_USE_FLOOR_MB = 512;
+
+  type GpuStatus = "idle" | "in-use" | "external" | "unknown";
+
+  // What the badge says about a GPU. "external" is the case worth surfacing:
+  // memory is occupied but llama-swap did not put it there.
+  function gpuStatus(gpu: GpuInfo, loadedCount: number): GpuStatus {
+    if (loadedCount > 0) return "in-use";
+    if (!gpu.totalMB) return "unknown";
+    return (gpu.usedMB ?? 0) >= EXTERNAL_USE_FLOOR_MB ? "external" : "idle";
+  }
+
+  const statusLabel: Record<GpuStatus, string> = {
+    idle: "Idle",
+    "in-use": "In use",
+    external: "Used externally",
+    unknown: "Idle",
+  };
+
+  const statusClass: Record<GpuStatus, string> = {
+    idle: "bg-muted text-muted-foreground",
+    "in-use": "bg-success/15 text-success",
+    external: "bg-warning/15 text-warning",
+    unknown: "bg-muted text-muted-foreground",
+  };
+
+  const statusTitle: Record<GpuStatus, string> = {
+    idle: "No models loaded and the device is essentially free",
+    "in-use": "llama-swap has one or more models loaded on this GPU",
+    external: "Memory is in use but llama-swap has no model here — another process is holding it",
+    unknown: "No memory reading available (the performance monitor is off or has not sampled this device)",
+  };
+
+  // The bar turns amber for memory llama-swap did not allocate, so a glance at
+  // the page separates "my models" from "someone else's".
+  function barClass(status: GpuStatus): string {
+    return status === "external" ? "bg-warning" : "bg-success";
+  }
+
   type DotColor = "grey" | "yellow" | "green";
   function statusDotColor(model: Model): DotColor {
     if (model.state === "ready") return "green";
@@ -86,8 +141,10 @@
   <div class="mt-4 mb-4">
     <h3 class="text-lg font-semibold">GPUs</h3>
     <p class="text-sm text-muted-foreground">
-      GPUs available on this host, the models loaded on each one, and controls
-      to load or unload any model defined in the configuration.
+      GPUs available on this host, their live memory use, the models loaded on
+      each one, and controls to load or unload any model defined in the
+      configuration. A GPU flagged <span class="text-warning">Used externally</span>
+      has memory held by a process llama-swap did not start.
     </p>
   </div>
 
@@ -100,23 +157,45 @@
       {#each $gpus as gpu (gpu.index)}
         {@const loaded = loadedOn(gpu)}
         {@const available = availableFor(gpu)}
+        {@const status = gpuStatus(gpu, loaded.length)}
+        {@const memory = formatGpuMemory(gpu.usedMB, gpu.totalMB)}
+        {@const pct = gpuMemoryPct(gpu.usedMB, gpu.totalMB)}
         <article
           class={cn(
             "rounded-md border p-4 transition-colors",
             loaded.length > 0 ? "bg-muted/20" : "bg-transparent",
           )}
         >
-          <div class="mb-3 flex items-center gap-2">
+          <div class="mb-2 flex items-center gap-2">
             <GpuIcon class="size-4 text-muted-foreground" />
             <h5 class="font-medium">{gpu.label}</h5>
-            {#if loaded.length === 0}
-              <span class="ml-auto rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                Idle
-              </span>
+            <span
+              class={cn("ml-auto flex items-center gap-1 rounded-full px-2 py-0.5 text-xs", statusClass[status])}
+              title={statusTitle[status]}
+            >
+              {#if status === "external"}<TriangleAlert class="size-3" />{/if}
+              {statusLabel[status]}
+            </span>
+          </div>
+
+          <!-- Live device memory. This is the only place that shows memory
+               held by processes llama-swap did not start. -->
+          <div class="mb-3">
+            {#if memory !== null && pct !== null}
+              <div class="flex items-baseline justify-between gap-2 text-xs">
+                <span class="text-muted-foreground">Memory</span>
+                <span class="font-mono tabular-nums">{memory}</span>
+              </div>
+              <div class="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div class={cn("h-full rounded-full transition-all", barClass(status))} style={`width: ${pct}%`}></div>
+              </div>
+              <div class="mt-1 text-right text-[0.625rem] text-muted-foreground">
+                {pct.toFixed(0)}% used
+              </div>
             {:else}
-              <span class="ml-auto rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">
-                In use
-              </span>
+              <p class="text-xs text-muted-foreground">
+                No memory reading (performance monitoring is off)
+              </p>
             {/if}
           </div>
 

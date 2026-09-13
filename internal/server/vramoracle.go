@@ -47,22 +47,37 @@ func newVRAMOracle(perfMon *perf.Monitor, st *store.Store, logger *logmon.Monito
 	return o
 }
 
-// DeviceMemory implements router.VRAMOracle. It returns the newest sample per
-// GPU: perf.Current() hands back the whole ring, oldest first, so a later
-// sample for the same device overwrites an earlier one.
-func (o *vramOracle) DeviceMemory() map[string]router.DeviceMemory {
-	_, gpuStats := o.perf.Current()
-	if len(gpuStats) == 0 {
+// newestGPUSamples reduces the performance monitor's ring to the most recent
+// sample per GPU. perf.Current() hands back the whole ring, so a later sample
+// for the same device wins. Shared by the VRAM oracle and the /api/gpus
+// handler so there is one definition of "the current reading".
+func newestGPUSamples(perfMon *perf.Monitor) map[int]perf.GpuStat {
+	if perfMon == nil {
 		return nil
 	}
-	newest := make(map[int]perf.GpuStat, len(gpuStats))
-	for _, g := range gpuStats {
+	_, gpuStats := perfMon.Current()
+	return newestPerGPU(gpuStats)
+}
+
+// newestPerGPU keeps the latest sample for each GPU id. Split out from
+// newestGPUSamples so the reduction can be tested without a live monitor.
+func newestPerGPU(stats []perf.GpuStat) map[int]perf.GpuStat {
+	if len(stats) == 0 {
+		return nil
+	}
+	newest := make(map[int]perf.GpuStat, len(stats))
+	for _, g := range stats {
 		if prev, ok := newest[g.ID]; ok && g.Timestamp.Before(prev.Timestamp) {
 			continue
 		}
 		newest[g.ID] = g
 	}
+	return newest
+}
 
+// DeviceMemory implements router.VRAMOracle.
+func (o *vramOracle) DeviceMemory() map[string]router.DeviceMemory {
+	newest := newestGPUSamples(o.perf)
 	out := make(map[string]router.DeviceMemory, len(newest))
 	for id, g := range newest {
 		if g.MemTotalMB <= 0 {

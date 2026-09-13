@@ -69,3 +69,32 @@ export function formatRelativeTime(timestamp: string): string {
   if (diffInHours < 24) return `${diffInHours}h ago`;
   return formatAbsoluteTime(timestamp);
 }
+
+/**
+ * Renders a GPU's used/total memory as one compact pair sharing a unit, e.g.
+ * "18.2 / 23.4 GiB". Both values come from the device in MiB.
+ *
+ * Returns null when there is no reading to show — the performance monitor is
+ * off, or it has not sampled this device yet. That is "unknown", which the
+ * caller must render differently from "empty".
+ */
+export function formatGpuMemory(usedMB?: number, totalMB?: number): string | null {
+  if (!Number.isFinite(totalMB ?? NaN) || (totalMB ?? 0) <= 0) return null;
+  const total = totalMB as number;
+  const used = Number.isFinite(usedMB ?? NaN) ? Math.max(usedMB as number, 0) : 0;
+  // GPUs are reported in MiB; anything past a gibibyte reads better in GiB.
+  if (total >= 1024) {
+    return `${(used / 1024).toFixed(1)} / ${(total / 1024).toFixed(1)} GiB`;
+  }
+  return `${Math.round(used)} / ${Math.round(total)} MiB`;
+}
+
+/**
+ * Percentage of a GPU's memory in use, clamped to 0-100. Returns null when
+ * there is no reading.
+ */
+export function gpuMemoryPct(usedMB?: number, totalMB?: number): number | null {
+  if (!Number.isFinite(totalMB ?? NaN) || (totalMB ?? 0) <= 0) return null;
+  const pct = ((usedMB ?? 0) / (totalMB as number)) * 100;
+  return Math.min(Math.max(pct, 0), 100);
+}

@@ -4,6 +4,8 @@ import {
   formatSpeed,
   formatFileSize,
   formatCapacity,
+  formatGpuMemory,
+  gpuMemoryPct,
   formatRelativeTime,
   formatAbsoluteTime,
 } from "./format";
@@ -92,5 +94,40 @@ describe("formatAbsoluteTime", () => {
     expect(formatAbsoluteTime(new Date(2026, 11, 31, 23, 59, 59).toISOString())).toBe(
       "2026-12-31 23:59:59"
     );
+  });
+});
+
+describe("formatGpuMemory", () => {
+  it("renders a used/total pair sharing one unit", () => {
+    expect(formatGpuMemory(18227, 24564)).toBe("17.8 / 24.0 GiB");
+  });
+
+  it("stays in MiB for small devices", () => {
+    expect(formatGpuMemory(100, 512)).toBe("100 / 512 MiB");
+  });
+
+  it("treats a missing used value as zero", () => {
+    expect(formatGpuMemory(undefined, 24564)).toBe("0.0 / 24.0 GiB");
+  });
+
+  it("returns null when there is no reading, which is not the same as empty", () => {
+    expect(formatGpuMemory(0, 0)).toBeNull();
+    expect(formatGpuMemory(1000, undefined)).toBeNull();
+    expect(formatGpuMemory(undefined, undefined)).toBeNull();
+  });
+});
+
+describe("gpuMemoryPct", () => {
+  it("computes the percentage in use", () => {
+    expect(gpuMemoryPct(12000, 24000)).toBe(50);
+  });
+
+  it("clamps out-of-range readings", () => {
+    expect(gpuMemoryPct(30000, 24000)).toBe(100);
+    expect(gpuMemoryPct(-5, 24000)).toBe(0);
+  });
+
+  it("returns null without a reading", () => {
+    expect(gpuMemoryPct(1000, 0)).toBeNull();
   });
 });

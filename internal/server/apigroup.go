@@ -12,6 +12,7 @@ import (
 
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/event"
+	"github.com/mostlygeek/llama-swap/internal/hw"
 	"github.com/mostlygeek/llama-swap/internal/perf"
 	"github.com/mostlygeek/llama-swap/internal/process"
 	"github.com/mostlygeek/llama-swap/internal/store"
@@ -457,6 +458,11 @@ func (s *Server) handleAPIHardware(w http.ResponseWriter, r *http.Request) {
 type apiGpu struct {
 	Index int    `json:"index"`
 	Label string `json:"label"`
+	// UsedMB and TotalMB are the device's live memory reading. They are 0 when
+	// the performance monitor is disabled or has not sampled this device yet,
+	// which the UI renders as "no reading" rather than as an empty GPU.
+	UsedMB  int `json:"usedMB,omitempty"`
+	TotalMB int `json:"totalMB,omitempty"`
 }
 
 // handleAPIGpus lists the GPUs this host exposes for model loading. It is the
@@ -465,10 +471,25 @@ type apiGpu struct {
 // override would use. Only accelerators with a known device index are listed;
 // when the host reports none, the endpoint returns an empty list and the UI
 // hides the selector so the model's configured GPU always applies.
+//
+// Each entry also carries the device's live memory reading, which the GPUs
+// page uses to show how much of a GPU is occupied — the only way to see memory
+// held by processes llama-swap did not start.
 func (s *Server) handleAPIGpus(w http.ResponseWriter, r *http.Request) {
+	// Live memory per device, so the UI can show how much of each GPU is in
+	// use — including by processes llama-swap did not start.
+	gpus := gpuList(s.hardware, newestGPUSamples(s.perf))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(gpus)
+}
+
+// gpuList merges the hardware snapshot with the live memory readings into the
+// /api/gpus payload. Pure, so the selection rules and the memory merge are
+// testable without a hardware snapshot or a running performance monitor.
+func gpuList(hardware *hw.HardwareSnapshot, memory map[int]perf.GpuStat) []apiGpu {
 	gpus := make([]apiGpu, 0)
-	if s.hardware != nil {
-		for _, a := range s.hardware.Accelerators {
+	if hardware != nil {
+		for _, a := range hardware.Accelerators {
 			if a.Kind != "gpu" || a.Model == nil || a.DeviceIndex == nil {
 				continue
 			}
@@ -490,12 +511,15 @@ func (s *Server) handleAPIGpus(w http.ResponseWriter, r *http.Request) {
 			if *a.Model != "" {
 				label += " " + *a.Model
 			}
-			gpus = append(gpus, apiGpu{Index: idx, Label: label})
+			entry := apiGpu{Index: idx, Label: label}
+			if g, ok := memory[idx]; ok && g.MemTotalMB > 0 {
+				entry.UsedMB, entry.TotalMB = g.MemUsedMB, g.MemTotalMB
+			}
+			gpus = append(gpus, entry)
 		}
 	}
 	sort.Slice(gpus, func(i, j int) bool { return gpus[i].Index < gpus[j].Index })
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(gpus)
+	return gpus
 }
 
 // selectableGpuVendors are the vendors whose GPUs can be targeted by device

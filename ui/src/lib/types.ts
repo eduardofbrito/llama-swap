@@ -53,6 +53,10 @@ export interface ProfileState {
 export interface GpuInfo {
   index: number;
   label: string;
+  // Live device memory. Both are absent when the performance monitor is off or
+  // has not sampled this device yet — which is "no reading", not "empty GPU".
+  usedMB?: number;
+  totalMB?: number;
 }
 
 export interface TokenMetrics {

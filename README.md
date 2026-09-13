@@ -26,13 +26,15 @@ Features added in this fork on top of upstream `main`:
   - See [routing capacity and request queues](docs/kb/guides/routing/capacity-and-queues.md) for the full behaviour and failure modes
 - ✅ **GPUs page** (`/gpus` menu item, right below Models)
   - Lists every GPU the host exposes with the model(s) currently loaded on each
+  - Shows each device's live used/total memory, refreshed while the page is open
+  - Flags a GPU **Used externally** when memory is occupied but llama-swap has no model there — the way to spot a card held by a training job, a second llama-swap or a desktop session
   - Load/unload controls per GPU for every model defined in the config (a model running on another GPU is swapped over)
 - ✅ **Model config tab** (`Models / <model>`, `Conf` tab)
   - Shows the model's block from the config file as editable YAML. Reading is a pure read: the file on disk is never rewritten, so nothing is reformatted and `-watch-config` is not woken
   - Saving validates the block, writes it back to the file (other models, comments, unrelated keys and the file's permission bits are preserved; the full result is validated through the config load pipeline before the file is touched, and the write is atomic) and triggers a hot reload — no restart
 - ✅ **Add model from the UI** - the Models page has an **Add Model** dialog that appends a new `models:` block to the config file (duplicate IDs rejected) and hot-reloads
 - ✅ **Config API** - machine-accessible endpoints, **off by default**:
-  - `GET /api/gpus` - list the GPUs available for model loading (real device indexes)
+  - `GET /api/gpus` - list the GPUs available for model loading (real device indexes) with each device's live used/total memory
   - `GET /api/config/status` - whether config editing is available on this instance (the UI hides the `Conf` tab and **Add Model** when it is not)
   - `GET /api/config/model/{model_id}` - one model's block from the config file as YAML
   - `PUT /api/config/model/{model_id}` - replace one model's block (invalid YAML → 422, file untouched)
@@ -84,7 +86,7 @@ Features added in this fork on top of upstream `main`:
   - `POST /api/models/unload/:model_id` - unload a specific model
   - `GET /api/profiles` - list configured profiles and the active selection
   - `PUT /api/profiles/active` - activate a profile or select none
-  - `GET /api/gpus` - list the GPUs available for model loading (fork)
+  - `GET /api/gpus` - list the GPUs available for model loading, with live memory per device (fork)
   - `GET /api/config/status` - report whether config editing is enabled (fork)
   - `GET /api/config/model/:model_id` - read one model's block from the config file as YAML (fork)
   - `PUT /api/config/model/:model_id` - replace one model's block in the config file (fork)
