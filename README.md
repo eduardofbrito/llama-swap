@@ -33,6 +33,13 @@ Features added in this fork on top of upstream `main`:
   - Shows the model's block from the config file as editable YAML. Reading is a pure read: the file on disk is never rewritten, so nothing is reformatted and `-watch-config` is not woken
   - Saving validates the block, writes it back to the file (other models, comments, unrelated keys and the file's permission bits are preserved; the full result is validated through the config load pipeline before the file is touched, and the write is atomic) and triggers a hot reload — no restart
 - ✅ **Add model from the UI** - the Models page has an **Add Model** dialog that appends a new `models:` block to the config file (duplicate IDs rejected) and hot-reloads
+- ✅ **Docker image over vLLM** - `docker/vllm-swap.Dockerfile` builds this fork's llama-swap (UI embedded) on top of the vLLM runtime image:
+
+  ```bash
+  docker build -f docker/vllm-swap.Dockerfile -t vllm-swap .
+  ```
+
+  It pins the fork commit through `LLAMA_SWAP_REF` so a build is reproducible, and stamps the binary's version from the checked-out tag (or its short SHA). The file's header documents the config keys worth enabling on a multi-GPU host.
 - ✅ **Config API** - machine-accessible endpoints, **off by default**:
   - `GET /api/gpus` - list the GPUs available for model loading (real device indexes) with each device's live used/total memory
   - `GET /api/config/status` - whether config editing is available on this instance (the UI hides the `Conf` tab and **Add Model** when it is not)
