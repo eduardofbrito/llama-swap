@@ -4,35 +4,59 @@
 # O config.yaml usa --load-format fastsafetensors, que exige o pacote
 # fastsafetensors (NAO vem na imagem base).
 #
+# Alem do vLLM, esta imagem carrega os demais runtimes que o llama-swap sabe
+# orquestrar. Cada um e opcional via --build-arg WITH_<X>=0 (todos ligados por
+# default). O que entra e quanto custa, aproximadamente, alem da base:
+#
+#   WITH_LLAMACPP=1    llama-server / llama-cli / llama-bench   ~0,3 GB
+#   WITH_WHISPERCPP=1  whisper-server (ASR)                     ~0,1 GB
+#   WITH_AUDIOCPP=1    audiocpp_server (TTS/ASR ggml)           ~0,2 GB
+#   (os tres acima compartilham ~0,7 GB de libs CUDA em /opt/ggml/lib)
+#   WITH_OLLAMA=1      binario oficial + runners CUDA proprios  ~2,5 GB
+#   WITH_COMFYUI=1     venv proprio com torch                   ~8 GB
+#   WITH_KOKORO=1      venv proprio com torch + modelo baked    ~7 GB
+#   WITH_QWEN3TTS=1    venv proprio com torch                   ~7 GB
+#
+# Com tudo ligado a imagem passa de 60 GB. Para uma variante enxuta:
+#   docker build --build-arg WITH_COMFYUI=0 --build-arg WITH_OLLAMA=0 \
+#                --build-arg WITH_KOKORO=0  --build-arg WITH_QWEN3TTS=0 \
+#                -f docker/vllm-swap.Dockerfile -t vllm-swap-slim .
+#
 # Build:
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
-#   # reprodutivel no commit atual do fork (main):
+#   # reprodutivel no commit atual do fork (main, checado em 2026-09-13):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=3972f033518b025c97513e08b28ffb5210e48fe3 -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121 -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
 #
 # O llama-swap e COMPILADO a partir do fork eduardofbrito/llama-swap,
 # porque as features dele nao estao em nenhuma release upstream
-# (commits 8f2b0b2..3972f03, todos em main):
+# (commits 8f2b0b2..56bea6b, todos em main; HEAD checado em 2026-09-13):
 #   - seletor de GPU por modelo + pagina GPUs na UI
-#   - pagina GPUs mostra memoria usada/total por device e marca
-#     "Used externally" a GPU ocupada por processo alheio ao llama-swap
 #   - aba Conf: edicao do config.yaml pela UI (ver --enable-config-api abaixo)
 #   - manualOnly: modelo que nunca carrega sob demanda (503 rapido)
 #   - recentPoolSize: pool LRU, carregar um modelo nao derruba todos os outros
 #   - vramCheck: recusa load quando a GPU nao tem memoria livre suficiente
 #   - grupos com `gpus`: distribui os membros entre GPUs, um por device
-# Build em 3 estagios:
+#   (3 commits novos desde o pin anterior, 8aa0580: GPU memory ao vivo na
+#   pagina GPUs, a propria imagem Docker vLLM-based deste fork, e um
+#   .dockerignore pra builds com contexto na raiz do repo)
+# Build em estagios:
 #   1. node:24-slim   -> build da UI (Svelte/Vite)
 #   2. golang:1.27.1  -> go build -tags embed_ui (UI embutida no binario)
-#   3. vllm base      -> fastsafetensors/numba + binario final
+#   2b. imagem preview -> so filesystem, pro vLLM experimental do Flash-Next
+#   2c. cuda devel    -> llama.cpp, whisper.cpp e audio.cpp (ggml, CUDA)
+#   2d. debian slim   -> tarball oficial do Ollama
+#   2e/f/g. vllm base -> venvs isolados de ComfyUI, Kokoro e Qwen3-TTS
+#   3. vllm base      -> fastsafetensors/numba + binario final + tudo acima
 #
 # NOTA DE SINTAXE: nada de heredoc nem de string Python multi-linha aqui.
 # O builder classico encerra o RUN em qualquer linha que nao termine em "\",
 # e passa a interpretar o conteudo do script como instrucao Dockerfile.
-# Por isso toda chamada Python abaixo cabe em uma linha so.
+# Por isso toda chamada Python abaixo cabe em uma linha so. Os estagios novos
+# seguem a mesma regra: scripts sao escritos com printf '%s\n', nunca heredoc.
 # =============================================================================
 
 # v0.29.0 e a ultima release estavel (CUDA 13.0, como o v0.28.0). O guard
@@ -61,11 +85,72 @@ ARG VLLM_IMAGE=vllm/vllm-openai:v0.29.0
 ARG FLASH_NEXT_VLLM_IMAGE=vllm/vllm-openai:qwen38-flash-next
 
 # ---------------------------------------------------------------------------
+# Runtimes adicionais — todos opcionais, todos ligados por default.
+#
+# CUDA_DEVEL_IMAGE precisa casar com a imagem final em DOIS eixos:
+#   - CUDA maior (13.x aqui, como a base v0.29.0) — senao o libcudart copiado
+#     nao e o que os binarios pedem
+#   - versao do Ubuntu / glibc — um binario compilado no 24.04 nao roda numa
+#     base 22.04. O guard do passo 8 roda `ldd` em cada binario, e um
+#     descasamento de glibc aparece ali como "not found", falhando o build em
+#     vez de virar erro de runtime. Atencao: o ldd prova que as bibliotecas
+#     resolvem, nao que o binario executa — um build que caiu pra CPU em
+#     silencio passa (so o audio.cpp tem checagem do link de CUDA).
+#
+# CMAKE_CUDA_ARCHITECTURES=90 e Hopper (H100), a arquitetura de destino desta
+# imagem.
+# Compilar so a arquitetura da casa deixa o build muito mais rapido e a imagem
+# menor. Se a imagem for rodar em outro host, adicione o numero dele aqui
+# (ex.: "89;90" pra Ada + Hopper) — arquiteturas ausentes ainda rodam por JIT
+# do PTX mais proximo, pagando o custo na primeira execucao.
+# ---------------------------------------------------------------------------
+ARG CUDA_DEVEL_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu24.04
+ARG CMAKE_CUDA_ARCHITECTURES=90
+
+# NCCL: o ggml (tanto o do llama.cpp quanto o vendorizado no audio.cpp) tem
+# GGML_CUDA_NCCL ligado por DEFAULT, e a imagem CUDA devel traz libnccl-dev —
+# entao os binarios linkam NCCL sem ninguem pedir, e a lib (centenas de MB)
+# passa a ter que viajar junto pra imagem final.
+#
+# Aqui isso fica DESLIGADO porque o proveito seria nulo neste host: o
+# placement por grupo do fork coloca um modelo por GPU, e NCCL so serve para
+# um mesmo processo falar com varias GPUs. O proprio llama.cpp trata a
+# ausencia como aviso, nao erro ("performance for multiple CUDA GPUs will be
+# suboptimal"). Ligue com --build-arg GGML_CUDA_NCCL=ON se algum dia rodar um
+# GGUF grande dividido entre placas.
+ARG GGML_CUDA_NCCL=OFF
+
+ARG WITH_LLAMACPP=1
+ARG WITH_WHISPERCPP=1
+ARG WITH_AUDIOCPP=1
+ARG WITH_OLLAMA=1
+ARG WITH_COMFYUI=1
+ARG WITH_KOKORO=1
+ARG WITH_QWEN3TTS=1
+
+# Pins. Nenhum destes projetos promete estabilidade entre commits; a data ao
+# lado e quando o pin foi conferido. Suba um de cada vez.
+ARG LLAMACPP_REF=b10941
+ARG WHISPERCPP_REF=v1.9.4
+ARG AUDIOCPP_REF=v0.7.4
+ARG COMFYUI_REF=master
+ARG OLLAMA_VERSION=v0.34.0
+ARG KOKORO_REF=master
+ARG QWEN3TTS_REF=main
+
+# Indice de wheels do torch para os venvs isolados. Vazio = PyPI, que hoje
+# entrega o torch com runtime CUDA 12.8 embutido no proprio wheel — roda em
+# qualquer driver recente, inclusive num host com CUDA 13, e nao depende de
+# download.pytorch.org estar liberado na rede. Aponte para
+# https://download.pytorch.org/whl/cu130 se quiser casar o ponto do CUDA.
+ARG TORCH_INDEX_URL=
+
+# ---------------------------------------------------------------------------
 # Estagio 1: build da UI (Svelte 5 / Vite)
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=3972f033518b025c97513e08b28ffb5210e48fe3
+ARG LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121
 
 RUN set -eux; \
     apt-get update; \
@@ -84,7 +169,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=3972f033518b025c97513e08b28ffb5210e48fe3
+ARG LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
@@ -109,6 +194,277 @@ RUN set -eux; \
 FROM ${FLASH_NEXT_VLLM_IMAGE} AS flash-next-vllm
 
 # ---------------------------------------------------------------------------
+# Estagio 2c: llama.cpp, whisper.cpp e audio.cpp (familia ggml, CUDA)
+#
+# Os tres saem do mesmo estagio porque compartilham toolchain e, no fim, o
+# mesmo conjunto de libs CUDA — copia-las uma vez em /opt/ggml/lib e o que
+# evita triplicar ~700 MB de cuBLAS na imagem final.
+#
+# Cada componente e um `if` dentro do RUN, nao um estagio proprio: com
+# WITH_X=0 o compile e pulado, mas a imagem CUDA devel ainda e baixada. Se
+# voce nao quer NENHUM dos tres e se incomoda com esse download, comente este
+# estagio inteiro e o COPY correspondente no passo 6.
+#
+# whisper.cpp e compilado SEM ffmpeg de proposito (WHISPER_FFMPEG=OFF): ligar
+# isso faz o binario linkar libavcodec/libavformat da imagem de build, cujas
+# sonames nao necessariamente batem com as da imagem final. A imagem final tem
+# o executavel ffmpeg instalado, entao converta a entrada pra WAV 16 kHz antes
+# de mandar pro whisper-server quando ela nao for WAV.
+# ---------------------------------------------------------------------------
+FROM ${CUDA_DEVEL_IMAGE} AS ggml-build
+
+ARG CMAKE_CUDA_ARCHITECTURES
+ARG GGML_CUDA_NCCL
+ARG WITH_LLAMACPP
+ARG WITH_WHISPERCPP
+ARG WITH_AUDIOCPP
+ARG LLAMACPP_REF
+ARG WHISPERCPP_REF
+ARG AUDIOCPP_REF
+
+# bash + pipefail: os guards abaixo usam pipe (ldd|awk|grep, readelf|grep). Com
+# o /bin/sh default uma falha no meio do pipe fica mascarada e o guard passa.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# /out existe sempre, mesmo com os tres desligados — o COPY do estagio final
+# nao pode depender de um ARG.
+RUN set -eux; \
+    mkdir -p /out/bin /out/lib /out/share; \
+    echo "=== espaco livre neste estagio de build ==="; df -h / /tmp || true; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios (inclusive archive.ubuntu.com, nao so o da NVIDIA), o problema quase nunca e chave de GPG: e disco cheio no host do Docker. O InRelease chega truncado e a assinatura nao confere. Confira 'df -h /var/lib/docker' e libere espaco ('docker system prune -af --volumes'). Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
+    apt-get install -y --no-install-recommends build-essential cmake git curl ca-certificates pkg-config libgomp1 binutils; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- llama.cpp -------------------------------------------------------------
+RUN set -eux; \
+    if [ "$WITH_LLAMACPP" != "1" ]; then echo "WITH_LLAMACPP=0 — pulando llama.cpp"; exit 0; fi; \
+    git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git /src/llama.cpp; \
+    git -C /src/llama.cpp checkout --quiet ${LLAMACPP_REF}; \
+    cmake -S /src/llama.cpp -B /src/llama.cpp/build \
+      -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF \
+      -DGGML_CUDA=ON -DGGML_VULKAN=OFF -DGGML_CUDA_NCCL="${GGML_CUDA_NCCL}" \
+      -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+      -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler \
+      "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -lcuda"; \
+    cmake --build /src/llama.cpp/build --config Release -j"$(nproc)" --target llama-server llama-cli llama-bench; \
+    for b in llama-server llama-cli llama-bench; do test -f "/src/llama.cpp/build/bin/$b" || { echo "FALHA: $b nao foi gerado" >&2; exit 1; }; cp "/src/llama.cpp/build/bin/$b" /out/bin/; done; \
+    rm -rf /src/llama.cpp
+
+# --- whisper.cpp -----------------------------------------------------------
+RUN set -eux; \
+    if [ "$WITH_WHISPERCPP" != "1" ]; then echo "WITH_WHISPERCPP=0 — pulando whisper.cpp"; exit 0; fi; \
+    git clone --filter=blob:none https://github.com/ggml-org/whisper.cpp.git /src/whisper.cpp; \
+    git -C /src/whisper.cpp checkout --quiet ${WHISPERCPP_REF}; \
+    cmake -S /src/whisper.cpp -B /src/whisper.cpp/build \
+      -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DWHISPER_FFMPEG=OFF \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_CUDA=ON -DGGML_VULKAN=OFF -DGGML_CUDA_NCCL="${GGML_CUDA_NCCL}" \
+      -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+      -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler \
+      "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -lcuda" \
+      "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -lcuda"; \
+    cmake --build /src/whisper.cpp/build --config Release -j"$(nproc)" --target whisper-server whisper-cli; \
+    for b in whisper-server whisper-cli; do test -f "/src/whisper.cpp/build/bin/$b" || { echo "FALHA: $b nao foi gerado" >&2; exit 1; }; cp "/src/whisper.cpp/build/bin/$b" /out/bin/; done; \
+    find /src/whisper.cpp/build \( -name "*.so" -o -name "*.so.*" \) -exec cp -a {} /out/lib/ \; ; \
+    rm -rf /src/whisper.cpp
+
+# --- audio.cpp -------------------------------------------------------------
+# AUDIOCPP_DEPLOYMENT_BUILD=ON compila o catalogo model_specs/ dentro do
+# binario; sem isso um pacote safetensors falha com "model spec not found".
+# O build fica estatico de proposito, pra nao jogar um terceiro libggml*.so
+# ABI-incompativel em cima dos do whisper.cpp.
+RUN set -eux; \
+    if [ "$WITH_AUDIOCPP" != "1" ]; then echo "WITH_AUDIOCPP=0 — pulando audio.cpp"; exit 0; fi; \
+    git clone --filter=blob:none https://github.com/0xShug0/audio.cpp.git /src/audio.cpp; \
+    git -C /src/audio.cpp checkout --quiet ${AUDIOCPP_REF}; \
+    cmake -S /src/audio.cpp -B /src/audio.cpp/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DAUDIOCPP_DEPLOYMENT_BUILD=ON -DAUDIOCPP_MODEL_SET=full \
+      -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_ENABLE_OPENMP=ON \
+      -DENGINE_BUILD_EXAMPLES=OFF -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_WARMBENCH=OFF \
+      -DENGINE_ENABLE_CUDA=ON -DENGINE_ENABLE_CUDA_GRAPHS=ON -DENGINE_ENABLE_VULKAN=OFF \
+      -DGGML_CUDA_NCCL="${GGML_CUDA_NCCL}" \
+      -DCUDAToolkit_ROOT=/usr/local/cuda -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+      -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES}" \
+      -DCMAKE_CUDA_FLAGS=-allow-unsupported-compiler \
+      "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -lcuda"; \
+    cmake --build /src/audio.cpp/build --config Release -j"$(nproc)" --target audiocpp_server audiocpp_cli; \
+    for b in audiocpp_server audiocpp_cli; do test -f "/src/audio.cpp/build/bin/$b" || { echo "FALHA: $b nao foi gerado" >&2; exit 1; }; readelf -d "/src/audio.cpp/build/bin/$b" | grep NEEDED | grep -qE 'libcudart\.so\.1[23]' || { echo "FALHA: $b nao linkou runtime CUDA 12/13 — o build caiu pra CPU em silencio" >&2; exit 1; }; cp "/src/audio.cpp/build/bin/$b" /out/bin/; done; \
+    mkdir -p /out/share/audiocpp; \
+    cp -r /src/audio.cpp/model_specs /out/share/audiocpp/model_specs; \
+    rm -rf /src/audio.cpp
+
+# --- libs CUDA que os binarios acima precisam em runtime ---------------------
+# Coletadas por ldd, nao por lista fixa: se um upgrade passar a pedir libcufft
+# ou libnvrtc, ela vem junto sem ninguem lembrar de editar aqui.
+#
+# A busca NAO se limita a /usr/local/cuda. Foi assim que a primeira versao
+# deste arquivo deixou libnccl.so.2 pra tras: o pacote libnccl2 instala em
+# /usr/lib/x86_64-linux-gnu, fora da arvore do CUDA, e o filtro por caminho
+# nao a via. Agora o criterio e o NOME da biblioteca (libcu*, libnccl*,
+# libnv*, libcudnn*), venha ela de onde vier.
+#
+# libcuda.so.1 (o driver) e os stubs ficam de fora DE PROPOSITO — quem entrega
+# o driver e o host, via nvidia-container-toolkit. Copiar o stub daqui produz
+# um container que sobe e nao ve GPU nenhuma.
+#
+# A lista de nomes e explicita, e nao um prefixo curto tipo "libcu*": esse
+# prefixo tambem casa com libcurl, e mandar a libcurl da imagem de build pra
+# imagem final sombreia a da base com uma ABI que pode nao bater.
+#
+# ldconfig -n no fim recria os links de SONAME (libfoo.so.1 -> libfoo.so.1.2.3)
+# dentro de /out/lib. Sem isso um binario que pede o SONAME nao acha a lib,
+# mesmo com o arquivo real ali do lado.
+RUN set -eux; \
+    if [ -z "$(ls -A /out/bin 2>/dev/null)" ]; then echo "nenhum binario ggml — nada de lib pra copiar"; exit 0; fi; \
+    for b in /out/bin/*; do LD_LIBRARY_PATH=/out/lib ldd "$b" 2>/dev/null || true; done \
+      | awk '/=> \// {print $3}' \
+      | grep -vE '/stubs/|/libcuda\.so' \
+      | grep -E '/(libcudart|libcublas|libcudnn|libcufft|libcurand|libcusparse|libcusolver|libcupti|libcufile|libnccl|libnvrtc|libnvjitlink|libnvToolsExt|libnvperf)[^/]*$' \
+      | sort -u > /tmp/cudalibs.txt; \
+    echo "=== libs NVIDIA que viajam com os binarios ==="; cat /tmp/cudalibs.txt; \
+    while read -r l; do [ -n "$l" ] && cp -L "$l" /out/lib/; done < /tmp/cudalibs.txt; \
+    cp -L /usr/lib/x86_64-linux-gnu/libgomp.so.1 /out/lib/ 2>/dev/null || true; \
+    ldconfig -n /out/lib; \
+    echo "=== /out/lib ==="; ls -la /out/lib; du -sh /out/lib
+
+# Guard do proprio estagio: repete a checagem que a imagem final faz, mas aqui,
+# onde o erro aponta pra causa. Uma lib que o filtro acima nao pegou falha o
+# build no estagio que a produziu, em vez de 40 minutos depois.
+RUN set -eux; \
+    fail=0; \
+    for b in /out/bin/*; do \
+      [ -f "$b" ] || continue; \
+      missing=$(LD_LIBRARY_PATH=/out/lib ldd "$b" 2>/dev/null | grep 'not found' | grep -v 'libcuda\.so' || true); \
+      if [ -n "$missing" ]; then echo "FALHA: $(basename "$b") ficou sem:" >&2; echo "$missing" >&2; fail=1; fi; \
+    done; \
+    [ "$fail" = "0" ] || { echo "Alguma lib nao foi coletada. Se o nome comeca com lib{cu,nccl,nv,cudnn} o filtro do RUN anterior precisa ser ampliado; se e uma lib do proprio projeto (libwhisper, libggml), o build dele voltou a gerar shared libs e o -DBUILD_SHARED_LIBS=OFF nao pegou." >&2; exit 1; }; \
+    echo "=== estagio ggml: binarios com todas as dependencias resolvidas ==="
+
+# ---------------------------------------------------------------------------
+# Estagio 2d: Ollama (binario oficial)
+#
+# O tarball oficial ja traz os runners CUDA do Ollama em lib/ollama/. Ele NAO
+# usa o vLLM nem o llama.cpp desta imagem — e um servidor inteiro, com daemon
+# proprio e catalogo de modelos proprio. Por isso ele entra como arvore
+# isolada em /opt/ollama e nao em /usr.
+#
+# O asset mudou de nome: hoje e .tar.zst (era .tgz). Baixamos do GitHub, e nao
+# de ollama.com/download, para pinar a versao de verdade.
+# ---------------------------------------------------------------------------
+FROM debian:trixie-slim AS ollama-dl
+
+ARG WITH_OLLAMA
+ARG OLLAMA_VERSION
+
+RUN set -eux; \
+    mkdir -p /out/ollama; \
+    if [ "$WITH_OLLAMA" != "1" ]; then echo "WITH_OLLAMA=0 — pulando Ollama"; exit 0; fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get install -y --no-install-recommends curl ca-certificates zstd tar; \
+    rm -rf /var/lib/apt/lists/*; \
+    curl -fsSL -o /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"; \
+    tar --zstd -xf /tmp/ollama.tar.zst -C /out/ollama; \
+    rm -f /tmp/ollama.tar.zst; \
+    test -x /out/ollama/bin/ollama || { echo "FALHA: bin/ollama nao veio no tarball — o layout do asset mudou" >&2; ls -R /out/ollama >&2; exit 1; }; \
+    ls -la /out/ollama/bin
+
+# ---------------------------------------------------------------------------
+# Estagios 2e/2f/2g: servicos Python, cada um no seu venv
+#
+# Os tres partem da PROPRIA imagem final (${VLLM_IMAGE}) por dois motivos:
+#   1. o interprete e o mesmo, entao o venv criado aqui funciona la — um venv
+#      feito com outro python3.12 aponta pra um binario que nao existe na
+#      imagem final e quebra na primeira execucao
+#   2. a imagem ja foi baixada, entao o estagio nao custa download nenhum
+#
+# Sao venvs SEM --system-site-packages: cada servico traz o proprio torch.
+# Isso e caro em disco (~7 GB cada) e e o ponto: ComfyUI quer
+# transformers>=4.50, o Qwen3-TTS pina transformers==4.57.3 e o vLLM 0.29
+# exige >=5.10.4. Qualquer tentativa de compartilhar site-packages termina
+# com um `pip` bem-intencionado derrubando o vLLM em producao.
+# ---------------------------------------------------------------------------
+FROM ${VLLM_IMAGE} AS comfyui-build
+
+ARG WITH_COMFYUI
+ARG COMFYUI_REF
+ARG TORCH_INDEX_URL
+
+RUN set -eux; \
+    mkdir -p /out/comfyui; \
+    if [ "$WITH_COMFYUI" != "1" ]; then echo "WITH_COMFYUI=0 — pulando ComfyUI"; exit 0; fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get install -y --no-install-recommends git ca-certificates python3-venv; \
+    rm -rf /var/lib/apt/lists/*; \
+    git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /out/comfyui/app; \
+    git -C /out/comfyui/app checkout --quiet ${COMFYUI_REF}; \
+    python3 -m venv /out/comfyui/venv; \
+    /out/comfyui/venv/bin/pip install --no-cache-dir --upgrade pip wheel; \
+    if [ -n "$TORCH_INDEX_URL" ]; then /out/comfyui/venv/bin/pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" torch torchvision torchaudio; fi; \
+    /out/comfyui/venv/bin/pip install --no-cache-dir -r /out/comfyui/app/requirements.txt; \
+    /out/comfyui/venv/bin/python -c "import torch, comfy; print('comfyui deps OK, torch', torch.__version__)" 2>/dev/null || /out/comfyui/venv/bin/python -c "import torch; print('torch', torch.__version__)"; \
+    find /out/comfyui/venv -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+FROM ${VLLM_IMAGE} AS kokoro-build
+
+ARG WITH_KOKORO
+ARG KOKORO_REF
+# O dicionario UniDic (japones) sao ~526 MB. Desligado por default porque a
+# casa serve pt-BR e ingles; ligue se precisar de ja.
+ARG KOKORO_JAPANESE=0
+# Modelo baked na imagem (~330 MB) pra o container nao depender de rede no
+# primeiro boot. Com 0 o entrypoint do Kokoro baixa no primeiro start.
+ARG KOKORO_DOWNLOAD_MODEL=1
+
+RUN set -eux; \
+    mkdir -p /out/kokoro; \
+    if [ "$WITH_KOKORO" != "1" ]; then echo "WITH_KOKORO=0 — pulando Kokoro"; exit 0; fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get install -y --no-install-recommends git ca-certificates python3-venv espeak-ng espeak-ng-data libsndfile1; \
+    rm -rf /var/lib/apt/lists/*; \
+    git clone --filter=blob:none https://github.com/remsky/Kokoro-FastAPI.git /out/kokoro/app; \
+    git -C /out/kokoro/app checkout --quiet ${KOKORO_REF}; \
+    command -v uv >/dev/null 2>&1 || python3 -m pip install --no-cache-dir --break-system-packages uv || python3 -m pip install --no-cache-dir uv; \
+    PY=$(command -v python3.12 || command -v python3); echo "interprete da base: $PY"; \
+    cd /out/kokoro/app && UV_PROJECT_ENVIRONMENT=/out/kokoro/venv UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 uv sync --frozen --extra gpu --no-install-project --python "$PY" --python-preference only-system; \
+    test -x /out/kokoro/venv/bin/python || { echo "FALHA: venv do Kokoro nao foi criado onde esperado" >&2; exit 1; }; \
+    if [ "$KOKORO_DOWNLOAD_MODEL" = "1" ]; then cd /out/kokoro/app && /out/kokoro/venv/bin/python docker/scripts/download_model.py --output api/src/models/v1_0; fi; \
+    if [ "$KOKORO_JAPANESE" = "1" ]; then /out/kokoro/venv/bin/python -m unidic download; fi; \
+    find /out/kokoro -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+FROM ${VLLM_IMAGE} AS qwen3tts-build
+
+ARG WITH_QWEN3TTS
+ARG QWEN3TTS_REF
+ARG TORCH_INDEX_URL
+
+# O fork groxaxo/Qwen3-TTS-Openai-Fastapi pina transformers==4.57.3 no
+# pyproject — e exatamente por isso que ele nao pode dividir site-packages com
+# o vLLM. flash-attn NAO e instalado: compila em ~20 min e o backend
+# "official" roda sem ele.
+RUN set -eux; \
+    mkdir -p /out/qwen3-tts; \
+    if [ "$WITH_QWEN3TTS" != "1" ]; then echo "WITH_QWEN3TTS=0 — pulando Qwen3-TTS"; exit 0; fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get -o Acquire::Retries=3 update; \
+    apt-get install -y --no-install-recommends git ca-certificates python3-venv ffmpeg libsndfile1 sox libsox-dev build-essential; \
+    rm -rf /var/lib/apt/lists/*; \
+    git clone --filter=blob:none https://github.com/groxaxo/Qwen3-TTS-Openai-Fastapi.git /out/qwen3-tts/app; \
+    git -C /out/qwen3-tts/app checkout --quiet ${QWEN3TTS_REF}; \
+    python3 -m venv /out/qwen3-tts/venv; \
+    /out/qwen3-tts/venv/bin/pip install --no-cache-dir --upgrade pip wheel setuptools; \
+    if [ -n "$TORCH_INDEX_URL" ]; then /out/qwen3-tts/venv/bin/pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" torch torchaudio; fi; \
+    /out/qwen3-tts/venv/bin/pip install --no-cache-dir "/out/qwen3-tts/app[api]"; \
+    /out/qwen3-tts/venv/bin/python -c "import torch, transformers; print('qwen3-tts deps OK — torch', torch.__version__, 'transformers', transformers.__version__)"; \
+    find /out/qwen3-tts -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # Estagio 3: imagem final sobre o vLLM
 # ---------------------------------------------------------------------------
 FROM ${VLLM_IMAGE}
@@ -123,11 +479,23 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # -----------------------------------------------------------------------------
 # 1) Dependencias de sistema
+#
+# Alem do basico do vLLM, aqui entram as libs de runtime dos servicos de audio
+# e imagem: espeak-ng (fonemizador do Kokoro), libsndfile/sox/ffmpeg (leitura e
+# escrita de audio no Kokoro e no Qwen3-TTS), libgomp (OpenMP do audio.cpp).
+# Sao pacotes apt — nenhum deles toca no ambiente Python pinado do vLLM.
+#
+# O link de espeak-ng-data e o mesmo truque do Dockerfile oficial do Kokoro: o
+# phonemizer procura os dados em /usr/share/espeak-ng-data, o Debian instala em
+# /usr/lib/<arch>/espeak-ng-data.
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl ca-certificates jq; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl ca-certificates jq \
+      ffmpeg libsndfile1 sox espeak-ng espeak-ng-data libgomp1; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /usr/share/espeak-ng-data; \
+    ln -sfn /usr/lib/*/espeak-ng-data/* /usr/share/espeak-ng-data/ 2>/dev/null || true
 
 # -----------------------------------------------------------------------------
 # 2) fastsafetensors, sem perturbar o ambiente
@@ -250,8 +618,10 @@ RUN set -eux; \
 ENV HF_HOME=/cache/huggingface \
     VLLM_CACHE_ROOT=/cache/vllm \
     TRITON_CACHE_DIR=/cache/triton \
-    OUTLINES_CACHE_DIR=/cache/outlines
-RUN mkdir -p /cache/huggingface /cache/vllm /cache/triton /cache/outlines
+    OUTLINES_CACHE_DIR=/cache/outlines \
+    NUMBA_CACHE_DIR=/cache/numba \
+    OLLAMA_MODELS=/cache/ollama
+RUN mkdir -p /cache/huggingface /cache/vllm /cache/triton /cache/outlines /cache/numba /cache/ollama
 
 # SEM `VOLUME ["/cache"]` de proposito. A instrucao VOLUME cria um volume
 # ANONIMO novo a cada `docker run` quando nada e montado ali — ou seja, o
@@ -268,10 +638,242 @@ RUN mkdir -p /cache/huggingface /cache/vllm /cache/triton /cache/outlines
 #   ou
 #     - /u01/cache:/cache         # bind, voce ve os arquivos no host
 
+# =============================================================================
+# 6) Runtimes adicionais
+#
+# Cada arvore vem de um estagio proprio. Com WITH_<X>=0 o estagio produz um
+# diretorio vazio e o COPY nao traz nada — os wrappers do passo 7 tambem nao
+# sao criados, entao o comando simplesmente nao existe na imagem.
+#
+# Nada aqui e ativado por default em RUNTIME: o llama-swap so executa o que
+# estiver escrito no config.yaml. Um binario presente e inerte.
+# =============================================================================
+COPY --from=ggml-build    /out            /opt/ggml
+COPY --from=ollama-dl     /out/ollama     /opt/ollama
+COPY --from=comfyui-build /out/comfyui    /opt/comfyui
+COPY --from=kokoro-build  /out/kokoro     /opt/kokoro
+COPY --from=qwen3tts-build /out/qwen3-tts /opt/qwen3-tts
+
+# -----------------------------------------------------------------------------
+# 7) Wrappers em /usr/local/bin
+#
+# Os binarios ggml precisam de LD_LIBRARY_PATH=/opt/ggml/lib (as libs CUDA
+# viajaram junto com eles, e nao estao no ld.so.conf da imagem). Os servicos
+# Python precisam entrar no venv certo. Em vez de exigir isso do config.yaml,
+# cada um ganha um wrapper de uma linha — assim o `cmd` do modelo fica igual
+# ao que a documentacao de cada projeto mostra.
+# -----------------------------------------------------------------------------
+ARG WITH_LLAMACPP
+ARG WITH_WHISPERCPP
+ARG WITH_AUDIOCPP
+ARG WITH_OLLAMA
+ARG WITH_COMFYUI
+ARG WITH_KOKORO
+ARG WITH_QWEN3TTS
+
+# --- ggml (llama.cpp / whisper.cpp / audio.cpp) ------------------------------
+RUN set -eux; \
+    for b in /opt/ggml/bin/*; do \
+      [ -f "$b" ] || continue; \
+      n=$(basename "$b"); \
+      chmod +x "$b"; \
+      printf '%s\n' \
+        '#!/bin/sh' \
+        '# wrapper gerado no build: poe as libs CUDA que viajaram com o binario' \
+        '# no caminho antes de exec. Ver passo 7 do Dockerfile.' \
+        'export LD_LIBRARY_PATH="/opt/ggml/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+        "exec /opt/ggml/bin/$n \"\$@\"" \
+        > "/usr/local/bin/$n"; \
+      chmod +x "/usr/local/bin/$n"; \
+    done; \
+    n=0; for w in /opt/ggml/bin/*; do [ -f "$w" ] && { echo "wrapper: $(basename "$w")"; n=$((n+1)); }; done; [ "$n" -gt 0 ] || echo "nenhum binario ggml nesta imagem"
+
+# --- Ollama ------------------------------------------------------------------
+# O tarball oficial ja traz os runners em lib/ollama, resolvidos pelo binario
+# em relacao ao proprio caminho — por isso bin/ e lib/ ficam lado a lado em
+# /opt/ollama e nao sao espalhados por /usr.
+#
+# OLLAMA_MODELS aponta pra /cache (volume), senao o catalogo baixado morre com
+# o container. OLLAMA_HOST NAO e fixado aqui: quem escolhe a porta e o
+# llama-swap, via ${PORT} no config.yaml.
+RUN set -eux; \
+    if [ "$WITH_OLLAMA" != "1" ] || [ ! -x /opt/ollama/bin/ollama ]; then echo "sem Ollama nesta imagem"; exit 0; fi; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# wrapper gerado no build. Uso tipico no config.yaml do llama-swap:' \
+      '#   cmd: ollama serve      (com OLLAMA_HOST=127.0.0.1:${PORT} no env)' \
+      'export OLLAMA_MODELS="${OLLAMA_MODELS:-/cache/ollama}"' \
+      'exec /opt/ollama/bin/ollama "$@"' \
+      > /usr/local/bin/ollama; \
+    chmod +x /usr/local/bin/ollama
+
+# --- ComfyUI -----------------------------------------------------------------
+# --base-directory manda models/, custom_nodes/, input/, output/ e user/ pra
+# fora da imagem. O default aponta pra /models/comfyui; sobrescreva passando
+# --base-directory no cmd do modelo.
+RUN set -eux; \
+    if [ "$WITH_COMFYUI" != "1" ] || [ ! -x /opt/comfyui/venv/bin/python ]; then echo "sem ComfyUI nesta imagem"; exit 0; fi; \
+    mkdir -p /models/comfyui; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# wrapper gerado no build: entra no venv isolado do ComfyUI.' \
+      '#   comfyui-server --listen 127.0.0.1 --port ${PORT} --cuda-device 0' \
+      'set -eu' \
+      'cd /opt/comfyui/app' \
+      'case " $* " in *" --base-directory "*) ;; *) set -- "$@" --base-directory /models/comfyui ;; esac' \
+      'exec /opt/comfyui/venv/bin/python main.py "$@"' \
+      > /usr/local/bin/comfyui-server; \
+    chmod +x /usr/local/bin/comfyui-server
+
+# --- Kokoro (TTS) ------------------------------------------------------------
+# Servidor OpenAI-compativel: /v1/audio/speech e /v1/audio/voices. Aceita
+# --host/--port porque quem sobe e o uvicorn.
+RUN set -eux; \
+    if [ "$WITH_KOKORO" != "1" ] || [ ! -x /opt/kokoro/venv/bin/python ]; then echo "sem Kokoro nesta imagem"; exit 0; fi; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# wrapper gerado no build: sobe o Kokoro-FastAPI no venv isolado.' \
+      '#   kokoro-server --host 127.0.0.1 --port ${PORT}' \
+      'set -eu' \
+      'cd /opt/kokoro/app' \
+      'export PYTHONPATH="/opt/kokoro/app:/opt/kokoro/app/api${PYTHONPATH:+:$PYTHONPATH}"' \
+      'export USE_GPU="${USE_GPU:-true}" DEVICE="${DEVICE:-gpu}"' \
+      'export PHONEMIZER_ESPEAK_PATH="${PHONEMIZER_ESPEAK_PATH:-/usr/bin}"' \
+      'export PHONEMIZER_ESPEAK_DATA="${PHONEMIZER_ESPEAK_DATA:-/usr/share/espeak-ng-data}"' \
+      'export ESPEAK_DATA_PATH="${ESPEAK_DATA_PATH:-/usr/share/espeak-ng-data}"' \
+      'exec /opt/kokoro/venv/bin/python -m uvicorn api.src.main:app "$@"' \
+      > /usr/local/bin/kokoro-server; \
+    chmod +x /usr/local/bin/kokoro-server
+
+# --- Qwen3-TTS ---------------------------------------------------------------
+# Este nao le --host/--port: ele so olha as variaveis HOST e PORT. O wrapper
+# traduz as flags pra env, pra o cmd no config.yaml ficar igual ao dos outros.
+RUN set -eux; \
+    if [ "$WITH_QWEN3TTS" != "1" ] || [ ! -x /opt/qwen3-tts/venv/bin/python ]; then echo "sem Qwen3-TTS nesta imagem"; exit 0; fi; \
+    printf '%s\n' \
+      '#!/bin/sh' \
+      '# wrapper gerado no build: sobe o Qwen3-TTS-Openai-Fastapi no venv' \
+      '# isolado. O servidor le HOST/PORT do ambiente, entao traduzimos as' \
+      '# flags aqui:  qwen3-tts-server --host 127.0.0.1 --port ${PORT}' \
+      'set -eu' \
+      'while [ $# -gt 0 ]; do case "$1" in --host) HOST="$2"; shift 2 ;; --port) PORT="$2"; shift 2 ;; --backend) TTS_BACKEND="$2"; shift 2 ;; *) echo "qwen3-tts-server: argumento nao reconhecido: $1" >&2; exit 2 ;; esac; done' \
+      'cd /opt/qwen3-tts/app' \
+      'export HOST="${HOST:-127.0.0.1}" PORT="${PORT:-8880}"' \
+      'export TTS_BACKEND="${TTS_BACKEND:-official}"' \
+      'export PYTHONPATH="/opt/qwen3-tts/app${PYTHONPATH:+:$PYTHONPATH}"' \
+      'exec /opt/qwen3-tts/venv/bin/python -m api.main' \
+      > /usr/local/bin/qwen3-tts-server; \
+    chmod +x /usr/local/bin/qwen3-tts-server
+
+# -----------------------------------------------------------------------------
+# 8) Guards dos runtimes adicionais
+#
+# A checagem principal e o ldd: um binario ggml compilado contra outra glibc
+# ou outro ponto do CUDA linka limpo no builder e so falha quando alguem tenta
+# carregar um modelo. Aqui isso vira erro de build.
+#
+# libcuda.so.1 e ignorado de proposito — ele so aparece em runtime, entregue
+# pelo host via nvidia-container-toolkit. Durante o build ele SEMPRE consta
+# como "not found", e isso e o comportamento correto.
+# -----------------------------------------------------------------------------
+RUN set -eux; \
+    fail=0; \
+    for b in /opt/ggml/bin/*; do \
+      [ -f "$b" ] || continue; \
+      missing=$(LD_LIBRARY_PATH=/opt/ggml/lib ldd "$b" 2>/dev/null | grep 'not found' | grep -v 'libcuda\.so' || true); \
+      if [ -n "$missing" ]; then echo "FALHA: $(basename "$b") tem dependencia nao resolvida:" >&2; echo "$missing" >&2; fail=1; fi; \
+    done; \
+    [ "$fail" = "0" ] || { echo "Tres causas possiveis, nesta ordem: (a) uma lib NVIDIA que o filtro de coleta do estagio ggml-build nao pegou — amplie o grep de nomes la; (b) uma lib do proprio projeto (libwhisper, libggml) porque o build voltou a gerar shared libs; (c) CUDA_DEVEL_IMAGE nao casa com a base em versao de CUDA ou de Ubuntu/glibc. O guard equivalente dentro do ggml-build deveria ter pego (a) e (b) antes daqui." >&2; exit 1; }; \
+    for b in /opt/ggml/bin/*; do [ -f "$b" ] && echo "ggml OK: $(basename "$b")"; done; \
+    echo "=== binarios ggml verificados ==="
+
+RUN set -eux; \
+    if [ -x /opt/ollama/bin/ollama ]; then LD_LIBRARY_PATH=/opt/ollama/lib/ollama /opt/ollama/bin/ollama --version 2>&1 | head -2 || echo "AVISO: 'ollama --version' saiu diferente de zero (normal sem daemon)"; fi; \
+    if [ -x /opt/comfyui/venv/bin/python ]; then /opt/comfyui/venv/bin/python -c "import torch; print('comfyui venv: torch', torch.__version__)"; fi; \
+    if [ -x /opt/kokoro/venv/bin/python ]; then /opt/kokoro/venv/bin/python -c "import torch, uvicorn; print('kokoro venv: torch', torch.__version__)"; fi; \
+    if [ -x /opt/qwen3-tts/venv/bin/python ]; then /opt/qwen3-tts/venv/bin/python -c "import torch, transformers; print('qwen3-tts venv: transformers', transformers.__version__)"; fi; \
+    python3 -c "from importlib.metadata import version as v; print('vLLM do sistema segue intacto: transformers', v('transformers'))"; \
+    echo "=== runtimes adicionais verificados ==="
+
+# Os modelos ficam fora da imagem. /models e o ponto de montagem esperado
+# pelos exemplos abaixo; monte junto com /cache:
+#   -v /u01/models:/models -v /u01/cache:/cache
+RUN mkdir -p /models
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
   CMD curl -fsS http://localhost:8000/health || exit 1
+
+# =============================================================================
+# ENTRADAS DE EXEMPLO NO config.yaml
+#
+# Nenhum runtime desta imagem sobe sozinho — o llama-swap so executa o `cmd`
+# que estiver escrito no config. Os blocos abaixo sao o ponto de partida de
+# cada um. ${PORT} e substituido pelo llama-swap; sempre use 127.0.0.1 como
+# host, porque quem fala com a rede e o proxy, nao o backend.
+#
+# models:
+#   # --- llama.cpp -----------------------------------------------------------
+#   qwen3-30b-gguf:
+#     cmd: |
+#       llama-server --host 127.0.0.1 --port ${PORT}
+#       --model /models/Qwen3-30B-A3B-Q4_K_M.gguf
+#       --n-gpu-layers 99 --ctx-size 32768 --jinja
+#     env: ["CUDA_VISIBLE_DEVICES=0"]
+#
+#   # --- Ollama --------------------------------------------------------------
+#   # O Ollama e um daemon com catalogo proprio, nao um processo por modelo.
+#   # O padrao aqui e uma entrada que sobe o daemon; o modelo em si voce escolhe
+#   # pelo nome na requisicao, e o Ollama carrega sob demanda.
+#   ollama:
+#     cmd: ollama serve
+#     env: ["OLLAMA_HOST=127.0.0.1:${PORT}", "CUDA_VISIBLE_DEVICES=1"]
+#     checkEndpoint: /api/tags
+#     # Combine com manualOnly + um grupo persistent se quiser ele sempre de pe.
+#
+#   # --- whisper.cpp (ASR) ---------------------------------------------------
+#   # Compilado sem ffmpeg: mande WAV 16 kHz mono. Para outro formato, converta
+#   # antes (o executavel ffmpeg esta na imagem).
+#   whisper-large-v3:
+#     cmd: |
+#       whisper-server --host 127.0.0.1 --port ${PORT}
+#       --model /models/ggml-large-v3-turbo.bin
+#     env: ["CUDA_VISIBLE_DEVICES=2"]
+#
+#   # --- audio.cpp (TTS/ASR ggml) --------------------------------------------
+#   # Precisa de um server.json descrevendo os modelos; veja
+#   # docker/unified/audiocpp-server.example.json no repositorio do llama-swap.
+#   audiocpp:
+#     cmd: |
+#       audiocpp_server --host 127.0.0.1 --port ${PORT}
+#       --config /models/audiocpp-server.json --backend cuda --no-ui
+#     env: ["CUDA_VISIBLE_DEVICES=2"]
+#
+#   # --- ComfyUI -------------------------------------------------------------
+#   # O llama-swap tem endpoint dedicado /comfyui/ para este caso.
+#   comfyui:
+#     cmd: comfyui-server --listen 127.0.0.1 --port ${PORT} --cuda-device 0
+#     checkEndpoint: /system_stats
+#     ttl: 600
+#
+#   # --- Kokoro (TTS) --------------------------------------------------------
+#   kokoro:
+#     cmd: kokoro-server --host 127.0.0.1 --port ${PORT}
+#     env: ["CUDA_VISIBLE_DEVICES=3"]
+#     checkEndpoint: /health
+#
+#   # --- Qwen3-TTS -----------------------------------------------------------
+#   qwen3-tts:
+#     cmd: qwen3-tts-server --host 127.0.0.1 --port ${PORT}
+#     env: ["CUDA_VISIBLE_DEVICES=3"]
+#     checkEndpoint: /health
+#
+# Os dois TTS respondem em /v1/audio/speech, entao o LiteLLM pode apontar pra
+# ca em vez de pras stacks separadas — a diferenca e que sob o llama-swap eles
+# passam a disputar (e liberar) GPU junto com os demais modelos, em vez de
+# segurar VRAM o tempo todo.
+# =============================================================================
 
 # A imagem base define ENTRYPOINT ["vllm", "serve"] — sobrescrevemos.
 #
@@ -293,18 +895,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 # Sem apiKeys os endpoints respondem 403 e a UI esconde os dois controles — a
 # flag sozinha NAO expoe superficie de escrita sem autenticacao. O motivo do
 # gate duplo: quem consegue escrever um bloco de modelo escolhe o `cmd` dele e
-# depois pode inicia-lo, o que e execucao de comando arbitrario no host.
-# Remova a flag se voce nao quer editar o config pela UI nesta imagem.
+# depois pode inicia-lo, o que e execucao de comando arbitrario no host. Com
+# esta imagem esse poder cresceu: o `cmd` agora alcanca llama.cpp, Ollama,
+# ComfyUI e os dois TTS, nao so o vLLM. Remova a flag se voce nao quer editar o
+# config pela UI nesta imagem.
 #
 # O seletor de GPU da UI usa GET /api/gpus e o query param llama-swap-gpu; sem
 # GPU no host o seletor se oculta e o config.yaml continua mandando. Ele nao
 # depende de --enable-config-api.
-#
-# A pagina GPUs mostra memoria usada/total por device, lida do monitor de
-# performance. Se voce desligar performance no config.yaml, a pagina passa a
-# dizer "No memory reading" e a marcacao "Used externally" some junto — e ela
-# e justamente o jeito de ver uma GPU segurada pelo vllm-flash-next isolado ou
-# por outro processo fora do llama-swap.
 #
 # As features de GPU/scheduler sao todas opt-in pelo config.yaml e NAO mudam
 # nada por default. Para esta imagem (varias GPUs, vLLM pesado) as tres que
@@ -339,6 +937,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 #
 #   store:
 #     path: /cache/llama-swap.db
+#
+# Um aviso especifico do Ollama: ele NAO respeita o vramCheck nem o
+# recentPoolSize para os modelos que ele proprio carrega. Do ponto de vista do
+# llama-swap ha um processo so ("ollama serve"); o que acontece dentro dele e
+# invisivel. Se o Ollama entrar em producao aqui, prenda-o a uma GPU propria
+# via CUDA_VISIBLE_DEVICES — assim a pagina GPUs o mostra como "Used
+# externally" no device dele em vez de contaminar a contabilidade dos outros.
 ENTRYPOINT ["llama-swap", \
             "--config", "/app/config/config.yaml", \
             "--listen", "0.0.0.0:8000", \
