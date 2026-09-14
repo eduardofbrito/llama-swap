@@ -132,12 +132,15 @@
     return status === "external" ? "bg-warning" : "bg-success";
   }
 
-  type DotColor = "grey" | "yellow" | "green" | "dim-green";
+  type DotColor = "grey" | "yellow" | "green";
   function statusDotColor(model: Model): DotColor {
     if (model.state === "ready") return "green";
-    if (model.state === "starting" || model.state === "stopping") return "yellow";
-    // Alive and seconds from serving, but holding nothing on the device.
-    if (model.state === "sleeping") return "dim-green";
+    // Sleeping is yellow for the same reason starting and stopping are: alive,
+    // not serving. Kept in step with statusDotColor in stores/modelLoad so a
+    // model does not change colour between here and the Models page.
+    if (model.state === "starting" || model.state === "stopping" || model.state === "sleeping") {
+      return "yellow";
+    }
     return "grey";
   }
 
@@ -145,7 +148,6 @@
     grey: "bg-muted-foreground/40",
     yellow: "bg-warning",
     green: "bg-success",
-    "dim-green": "bg-success/40",
   };
 </script>
 

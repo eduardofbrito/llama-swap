@@ -51,10 +51,11 @@ export function onToggleLoad(m: Model): void {
 export function statusDotColor(m: Model | undefined): string {
   if (!m) return "bg-muted-foreground/40";
   if (m.state === "ready") return "bg-success";
-  if (m.state === "starting" || m.state === "stopping") return "bg-warning";
-  // Sleeping sits between ready and stopped: the process is alive and will
-  // wake in seconds, but it is holding no GPU memory and cannot serve yet.
-  // A dimmed success colour reads as "almost ready" rather than "off".
-  if (m.state === "sleeping") return "bg-success/40";
+  // Sleeping shares the transitional colour with starting/stopping: like
+  // those, the model is neither serving nor gone, and the next request puts
+  // it back in service. What separates it from "ready" green is what matters
+  // at a glance — it cannot answer right now. The state label and the
+  // `sleeping` badge next to the dot say which of the three it is.
+  if (m.state === "starting" || m.state === "stopping" || m.state === "sleeping") return "bg-warning";
   return "bg-muted-foreground/40";
 }
