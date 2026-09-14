@@ -140,9 +140,21 @@ func (g *vramGuard) shortfallMB(modelID, device string, evict []string) int {
 	g.mu.RUnlock()
 	want := need + need*margin/100
 
-	// Memory the evicted models are about to give back on each device. Only
-	// models with a known requirement count: an unknown one is assumed to free
-	// nothing, which errs toward refusing rather than toward a failed load.
+	// Memory the evicted models are about to give back on each device.
+	//
+	// An evictee with no known requirement makes the whole sum meaningless: the
+	// device's free memory after the swap is then unknowable, not zero. This
+	// used to credit such a model with nothing and carry on, which reads as
+	// conservative but is really the guard answering a question it cannot
+	// answer — and it refuses loads that would have succeeded. It is how a
+	// model sitting alone on a GPU, with a resident sibling about to be evicted
+	// off that same GPU, got told it was short by the sibling's entire
+	// footprint.
+	//
+	// So: admit, the same as every other path where the guard does not know.
+	// Refusing on ignorance is the one behaviour this check must never have —
+	// it turns a missing measurement into an outage. Declaring models.*.vramMB
+	// is what buys the protection back.
 	freed := make(map[string]int)
 	for _, id := range evict {
 		if id == modelID {
@@ -150,7 +162,7 @@ func (g *vramGuard) shortfallMB(modelID, device string, evict []string) int {
 		}
 		mb, ok := g.requirementMB(id)
 		if !ok {
-			continue
+			return 0
 		}
 		freed[g.deviceOf(id)] += mb
 	}
@@ -207,9 +219,15 @@ func (g *vramGuard) deviceSnapshot() map[string]DeviceMemory {
 // A measurement is only kept when it is positive and the device is the same in
 // both readings; anything else means something other than this model moved the
 // number, and a wrong measurement is worse than none.
-func (g *vramGuard) observeLoad(modelID, device string, before map[string]DeviceMemory) {
+// It reports why nothing was recorded, so a model that never acquires a
+// measurement is diagnosable. That matters more than it looks: the readings
+// come from the performance monitor's ring, sampled on an interval, and a swap
+// that finishes inside one sampling period sees the same sample at both ends —
+// a zero rise, no measurement, silently, forever. A model with no measurement
+// and no declared vramMB is one the guard cannot reason about at all.
+func (g *vramGuard) observeLoad(modelID, device string, before map[string]DeviceMemory) (recorded bool, why string) {
 	if g == nil || g.oracle == nil || len(before) == 0 {
-		return
+		return false, "no baseline reading"
 	}
 	if device == "" {
 		device = g.deviceOf(modelID)
@@ -217,16 +235,17 @@ func (g *vramGuard) observeLoad(modelID, device string, before map[string]Device
 	if device == "" {
 		// Without a device there is no single number to attribute to this
 		// model; a multi-GPU or unpinned load is not measured.
-		return
+		return false, "model pins no single device"
 	}
 	start, hadStart := before[device]
 	end, hadEnd := g.oracle.DeviceMemory()[device]
 	if !hadStart || !hadEnd {
-		return
+		return false, "device " + device + " missing from a reading"
 	}
 	used := end.UsedMB - start.UsedMB
 	if used <= 0 {
-		return
+		return false, "used memory did not rise across the load; the GPU sample likely did not refresh in time (see performance.every) — declare vramMB for this model"
 	}
 	g.oracle.RecordVRAMMB(modelID, used)
+	return true, ""
 }

@@ -263,3 +263,67 @@ func TestVRAMGuard_UpdateTracksConfigReload(t *testing.T) {
 		t.Errorf("shortfall = %d after the reload, want 6000; the guard must see the new config", got)
 	}
 }
+
+// TestVRAMGuard_AdmitsWhenAnEvicteeIsUnmeasured reproduces a production
+// refusal: a model was told it was "short by 66223 MB" for the GPU it was
+// about to have entirely to itself.
+//
+// The swap planned to evict the sibling holding that GPU, but the sibling had
+// no vramMB declared and no stored measurement, so the guard credited its
+// eviction with nothing and compared the target against the GPU's free memory
+// as if the sibling were staying. The device's free memory after a swap that
+// evicts an unmeasured model is unknowable, not zero — and the one rule this
+// guard has is that it admits whatever it cannot answer, because refusing on
+// ignorance turns a missing measurement into an outage.
+func TestVRAMGuard_AdmitsWhenAnEvicteeIsUnmeasured(t *testing.T) {
+	// The GPU is nearly full: the resident sibling is holding it.
+	oracle := newFakeOracle(map[string]DeviceMemory{"0": {UsedMB: 76000, TotalMB: 79600}})
+	g := newVRAMGuard(vramConfig(map[string]config.ModelConfig{
+		"target":   pinned("0", 69284), // knows what it needs
+		"resident": pinned("0", 0),     // no vramMB, and nothing measured
+	}), oracle)
+
+	if got := g.shortfallMB("target", "", []string{"resident"}); got != 0 {
+		t.Errorf("shortfall = %d, want 0; evicting an unmeasured sibling makes the "+
+			"post-swap free memory unknown, which must admit rather than refuse", got)
+	}
+}
+
+// TestVRAMGuard_StillRefusesWhenEveryEvicteeIsKnown pins that the fix above did
+// not just switch the guard off: with every number in hand it still does the
+// arithmetic, which is the case it exists for (memory held by something
+// llama-swap did not start).
+func TestVRAMGuard_StillRefusesWhenEveryEvicteeIsKnown(t *testing.T) {
+	// 76000 used, of which the evictee accounts for only 20000: the remaining
+	// 56000 belongs to a process llama-swap knows nothing about.
+	oracle := newFakeOracle(map[string]DeviceMemory{"0": {UsedMB: 76000, TotalMB: 79600}})
+	g := newVRAMGuard(vramConfig(map[string]config.ModelConfig{
+		"target":   pinned("0", 69284),
+		"resident": pinned("0", 20000),
+	}), oracle)
+
+	// free after eviction = 79600 - 76000 + 20000 = 23600, want 69284.
+	if got := g.shortfallMB("target", "", []string{"resident"}); got != 69284-23600 {
+		t.Errorf("shortfall = %d, want %d", got, 69284-23600)
+	}
+}
+
+// TestVRAMGuard_ObserveLoadExplainsAFlatReading covers the silent failure that
+// starved the guard of measurements in the first place: a swap that completes
+// inside one sampling period of the performance monitor sees the same GPU
+// sample at both ends, so the rise is zero and nothing is ever recorded.
+// Sleeping made this far more likely by cutting swaps from minutes to seconds.
+func TestVRAMGuard_ObserveLoadExplainsAFlatReading(t *testing.T) {
+	oracle := newFakeOracle(map[string]DeviceMemory{"0": {UsedMB: 19000, TotalMB: 24000}})
+	g := newVRAMGuard(vramConfig(map[string]config.ModelConfig{"m": pinned("0", 0)}), oracle)
+
+	before := g.deviceSnapshot() // the sample never advances
+	recorded, why := g.observeLoad("m", "", before)
+
+	if recorded {
+		t.Error("recorded a measurement from an unchanged sample")
+	}
+	if why == "" {
+		t.Error("no reason given; a model that never gets measured must be diagnosable")
+	}
+}

@@ -234,6 +234,23 @@ cannot hold them. Leave it out for the rest and let llama-swap learn it; the
 first load of an unmeasured model is always admitted, because refusing on
 ignorance would be worse than not checking at all.
 
+That rule covers the models being **evicted** too, not just the target: a swap
+that frees room by stopping a model with no known requirement leaves the
+device's post-swap free memory unknowable, so the check admits rather than
+guesses. The practical consequence is that `vramCheck` only really protects a
+GPU once every model that lands on it has a number — declare `vramMB` on the
+big ones instead of relying on measurement alone.
+
+Measurement is also easier to miss than it looks. It is taken as the rise in
+the GPU's used memory across a load, read from the performance monitor's
+sampled ring — so a swap that finishes inside one sampling period (see
+`performance.every`) sees the same sample at both ends, reads a zero rise, and
+records nothing. `models.*.sleepMode` makes this much more likely, because
+waking is seconds where a cold start was minutes. Wakes are deliberately not
+measured at all: restoring weights is a different quantity from a cold load,
+and a wrong requirement is worse than none. Run with `logLevel: debug` to see
+`no VRAM measurement for <model>` and why.
+
 ### When there is no room
 
 By default the request is refused and the recent-model pool keeps what it

@@ -521,6 +521,17 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 	beforeMem := b.vram.deviceSnapshot()
 
 	target := b.processesAt()[modelID]
+	// Only a cold start measures anything useful. EnsureReady also covers
+	// "already ready" (a no-op, where the delta is whatever else moved on the
+	// GPU) and "wake from sleep" (which restores weights but not the KV cache
+	// the cold load allocated, so its rise is a different quantity than the one
+	// the guard compares against). Recording either corrupts the stored
+	// requirement — and a wrong requirement is worse than none, because the
+	// guard trusts it. The read races the process's own run loop, which is
+	// fine: the cost of guessing wrong is a measurement taken or skipped, never
+	// a wrong load decision.
+	coldStart := target.State() == process.StateStopped
+
 	var err error
 	if opt, ok := target.(process.ProcessWithOptions); ok {
 		err = opt.EnsureReadyWithOptions(b.shutdownCtx, timeout, opts)
@@ -532,9 +543,13 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		// that is expected rather than worth a warning per model.
 		b.logger.Warnf("%s: starting %s failed: %v", b.name, modelID, err)
 	}
-	if err == nil {
-		// Only a successful load says anything about what the model needs.
-		b.vram.observeLoad(modelID, opts.GpuOverride, beforeMem)
+	if err == nil && coldStart {
+		// Only a successful cold start says anything about what the model needs.
+		if ok, why := b.vram.observeLoad(modelID, opts.GpuOverride, beforeMem); !ok && b.vram.enabled() {
+			// Worth saying out loud only when vramCheck is on: there, a model
+			// that never gets measured is one the guard has to admit blind.
+			b.logger.Debugf("%s: no VRAM measurement for %s: %s", b.name, modelID, why)
+		}
 	}
 
 	select {
