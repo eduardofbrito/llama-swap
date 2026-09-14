@@ -407,8 +407,24 @@ func stripAudioAPIPrefix(r *http.Request) {
 // global CORS middleware.
 func (s *Server) routes() {
 
-	authMW := CreateAuthMiddleware(s.configAt())
-	modelMWs := []chain.Middleware{authMW}
+	// Two independent key sets, two middleware instances:
+	//   - inferenceAuthMW gates model dispatch, /v1/models, /upstream and
+	//     /comfyui against InferenceAPIKeys (apiKeys ∪ uiApiKeys) — the
+	//     surface an external OpenAI/Anthropic-compatible client calls.
+	//   - uiAuthMW gates the dashboard and its control plane (everything
+	//     under /api/, /logs, /metrics, /unload, /running) against
+	//     UIAPIKeys (uiApiKeys, falling back to apiKeys).
+	// A dashboard key also satisfies inferenceAuthMW, and both middleware
+	// instances challenge under the same WWW-Authenticate realm, so a browser
+	// that authenticates once against /ui/ automatically carries those
+	// credentials into the Playground's own inference calls. An apiKeys-only
+	// client, conversely, can call the inference surface but not the
+	// dashboard or its control plane — see config.Config.InferenceAPIKeys and
+	// config.Config.UIAPIKeys for the exact fallback rules.
+	inferenceAuthMW := CreateAuthMiddleware(s.configAt(), config.Config.InferenceAPIKeys)
+	uiAuthMW := CreateAuthMiddleware(s.configAt(), config.Config.UIAPIKeys)
+
+	modelMWs := []chain.Middleware{inferenceAuthMW}
 	// globalConcurrencyLimit guards the top of the inference chain; a limit of
 	// 0 (the default) means no limit, so the handler is left out of the chain
 	// entirely rather than wrapping every request in a no-op semaphore.
@@ -428,8 +444,11 @@ func (s *Server) routes() {
 		CreateMetricsMiddleware(s.metrics, liveCfg),
 	)
 	modelChain := chain.New(modelMWs...)
-	// Custom endpoints only need auth.
-	apiChain := chain.New(authMW)
+	// Inference-adjacent endpoints (model listing, upstream, comfyui) that
+	// only need auth, not the full filter/metrics pipeline.
+	inferenceChain := chain.New(inferenceAuthMW)
+	// Dashboard + control-plane endpoints.
+	apiChain := chain.New(uiAuthMW)
 
 	mux := http.NewServeMux()
 	dispatch := http.HandlerFunc(s.localPeerHandler)
@@ -444,9 +463,12 @@ func (s *Server) routes() {
 		mux.Handle("GET "+path, modelChain.Then(dispatch))
 	}
 
-	// llama-swap API + custom endpoints.
-	mux.Handle("GET /v1/models", apiChain.ThenFunc(s.handleListModels))
-	mux.Handle("GET /models", apiChain.ThenFunc(s.handleListModels))
+	// Model listing: OpenAI SDKs and gateways (LiteLLM, etc.) routinely call
+	// this before dispatching, so it takes the inference key set rather than
+	// the UI's — an inference-only client must be able to list models without
+	// dashboard credentials.
+	mux.Handle("GET /v1/models", inferenceChain.ThenFunc(s.handleListModels))
+	mux.Handle("GET /models", inferenceChain.ThenFunc(s.handleListModels))
 	mux.Handle("GET /logs", apiChain.ThenFunc(s.handleLogs))
 	mux.Handle("GET /logs/stream", apiChain.ThenFunc(s.handleLogStream))
 	mux.Handle("GET /logs/stream/{logMonitorID...}", apiChain.ThenFunc(s.handleLogStream))
@@ -456,7 +478,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /{$}", handleRootRedirect)
 
 	// Embedded UI.
-	mux.Handle("GET /ui/", chain.New(authMW).ThenFunc(s.handleUI))
+	mux.Handle("GET /ui/", chain.New(uiAuthMW).ThenFunc(s.handleUI))
 	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 
 	// Prometheus metrics (wrapped by apiChain, matches the legacy endpoint).
@@ -467,8 +489,10 @@ func (s *Server) routes() {
 	mux.Handle("GET /running", apiChain.ThenFunc(s.handleRunning))
 
 	// Upstream passthrough. Meter only the model-dispatched endpoints that can
-	// produce token usage/timings.
-	upstreamChain := apiChain.Append(
+	// produce token usage/timings. Inference-keyed: this is a real model
+	// dispatch path (and the UI's own load/unload buttons go through it too,
+	// which a dashboard key already covers via InferenceAPIKeys).
+	upstreamChain := inferenceChain.Append(
 		CreateProfileMiddleware(s),
 		CreateUpstreamInflightMiddleware(s.inflight, s.configAt()),
 		CreateMetricsMiddleware(s.metrics, s.configAt()),
@@ -478,11 +502,12 @@ func (s *Server) routes() {
 
 	// ComfyUI compatibility passthrough. This uses the fixed comfyui_auto model,
 	// whose compatibility settings are applied while loading config. Only the
-	// root path may start an unloaded model.
-	mux.Handle("/comfyui", apiChain.ThenFunc(handleComfyUIRedirect))
-	mux.Handle("/comfyui/{comfyPath...}", apiChain.ThenFunc(s.handleComfyUI))
+	// root path may start an unloaded model. Inference-keyed: it dispatches to
+	// a model process the same way /upstream does.
+	mux.Handle("/comfyui", inferenceChain.ThenFunc(handleComfyUIRedirect))
+	mux.Handle("/comfyui/{comfyPath...}", inferenceChain.ThenFunc(s.handleComfyUI))
 
-	// API group (API-key protected) consumed by the UI.
+	// API group (UI-key protected) consumed by the UI.
 	mux.Handle("POST /api/models/unload", apiChain.ThenFunc(s.handleAPIUnloadAll))
 	mux.Handle("POST /api/models/unload/{model...}", apiChain.ThenFunc(s.handleAPIUnloadModel))
 	mux.Handle("GET /api/profiles", apiChain.ThenFunc(s.handleAPIProfiles))

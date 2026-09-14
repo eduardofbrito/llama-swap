@@ -51,7 +51,7 @@ Features added in this fork on top of upstream `main`:
 > [!WARNING]
 > A caller that can write a model block chooses that model's `cmd` and can then start it, which is arbitrary command execution on the host. The editing endpoints are therefore gated twice:
 > 1. start llama-swap with `-enable-config-api` (and a single `-config` file); otherwise they return **501**, and
-> 2. configure at least one key under `apiKeys`; otherwise they return **403**. llama-swap's auth middleware is a deliberate pass-through when no keys are set, so this second gate is what keeps the opt-in from publishing an unauthenticated write surface.
+> 2. configure at least one key under `uiApiKeys` (or `apiKeys` as its fallback); otherwise they return **403**. llama-swap's auth middleware is a deliberate pass-through when no keys are set, so this second gate is what keeps the opt-in from publishing an unauthenticated write surface.
 
 ## Features:
 
@@ -149,7 +149,7 @@ Model config tab and Add Model (fork):
 
 - `Models / <model>` has a `Conf` tab with the model's block from the config file as editable YAML; saving validates, writes back and hot-reloads without a restart
 - The Models page has an `Add Model` dialog that appends a new model to the config file
-- Both are hidden unless the server was started with `-enable-config-api` and has `apiKeys` configured
+- Both are hidden unless the server was started with `-enable-config-api` and has `uiApiKeys` (or `apiKeys` as its fallback) configured
 
 Real time log streaming:
 
@@ -396,7 +396,8 @@ You can also edit the config from the web UI (fork): the `Conf` tab of each mode
 (`Models / <model>`) edits that model's block in place, and the `Add Model` dialog on
 the Models page appends new models. Both validate, write back and hot-reload without
 a restart. Editing is off unless you start llama-swap with `-enable-config-api` and
-configure `apiKeys`; until then the UI hides both controls.
+configure `uiApiKeys` (or `apiKeys` as its fallback); until then the UI hides both
+controls.
 
 You can also just ask. The **Help** page (in the sidebar) is an agent that calls
 llama-swap's own documentation tools and answers questions about your

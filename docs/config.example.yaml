@@ -159,9 +159,11 @@ macros:
   "models_dir": "${env.HOME}/models"
 
 # apiKeys: require an API key when making requests to inference endpoints
+# (model dispatch, /upstream, /comfyui)
 # - optional, default: []
 # - when empty (the default) authorization will not be checked as llama-swap is default-allow
 # - each key is a non-empty string
+# - also accepted for the web UI and its control-plane endpoints when uiApiKeys is unset
 apiKeys:
   - "sk-hunter2"
   # tip, one liner: printf "sk-%s\n" "$(head -c 48 /dev/urandom | base64 )"
@@ -170,6 +172,20 @@ apiKeys:
   # use environment variable macros to keep secrets out of the config
   - "${env.API_KEY_1}"
   - "${env.API_KEY_2}"
+
+# uiApiKeys: require a (separate) API key for the web UI and its control-plane
+# endpoints (dashboard, /api/*, /logs, /metrics, /unload, /running)
+# - optional, default: []
+# - when empty (the default), falls back to apiKeys — a config that only ever
+#   set apiKeys keeps gating the UI exactly as it did before uiApiKeys existed
+# - a uiApiKeys key also works for inference, so a dashboard login can drive
+#   the Playground's chat/completions calls without a second key
+# - an apiKeys-only (inference) key does NOT open the UI once uiApiKeys is set
+# - set this to hand an external client (LiteLLM, an app) an inference-only
+#   apiKeys entry that cannot open the dashboard, unload models, or edit the
+#   config file, while keeping a separate, stronger key for operators
+uiApiKeys:
+  - "${env.UI_API_KEY}"
 
 # tailcat: configure models exposed over Tailcat virtual TCP port 80
 # - requires -listen-tailcat /path/to/server.private.json to start the listener

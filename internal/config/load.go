@@ -324,6 +324,15 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		}
 		config.RequiredAPIKeys[i] = apikey
 	}
+	for i, apikey := range config.UIRequiredAPIKeys {
+		if apikey == "" {
+			return Config{}, fmt.Errorf("empty api key found in uiApiKeys")
+		}
+		if strings.Contains(apikey, " ") {
+			return Config{}, fmt.Errorf("uiApiKeys[%d]: api key cannot contain spaces", i)
+		}
+		config.UIRequiredAPIKeys[i] = apikey
+	}
 
 	if err := ValidatePeerNamespace(config); err != nil {
 		return Config{}, err

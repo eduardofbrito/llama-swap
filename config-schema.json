@@ -697,7 +697,16 @@
                 "minLength": 1
             },
             "default": [],
-            "description": "Require an API key when making requests to inference endpoints. When empty, authorization will not be checked. Each key is a non-empty string."
+            "description": "Require an API key when making requests to inference endpoints (model dispatch, /upstream, /comfyui). When empty, authorization will not be checked. Also accepted for the web UI and its control-plane endpoints when uiApiKeys is unset. Each key is a non-empty string."
+        },
+        "uiApiKeys": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1
+            },
+            "default": [],
+            "description": "Require an API key for the web UI and its control-plane endpoints (dashboard, /api/*, /logs, /metrics, /unload, /running). A uiApiKeys key is also accepted for inference requests, so a dashboard login can drive the Playground. When empty, falls back to apiKeys — an existing config with only apiKeys keeps gating the UI exactly as before. Each key is a non-empty string."
         },
         "tailcat": {
             "type": "object",

@@ -910,6 +910,82 @@ func TestConfig_APIKeys_EnvMacros(t *testing.T) {
 	})
 }
 
+func TestConfig_UIAPIKeys_EnvMacros(t *testing.T) {
+	// Macro substitution runs at the raw YAML string level before unmarshal,
+	// so uiApiKeys gets it for free, same as apiKeys — pinned here so a
+	// future refactor of that pipeline can't silently special-case one field.
+	t.Setenv("TEST_UI_API_KEY", "ui-secret-456")
+
+	content := `uiApiKeys: ["${env.TEST_UI_API_KEY}"]`
+	config, err := LoadConfigFromReader(strings.NewReader(content))
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"ui-secret-456"}, config.UIRequiredAPIKeys)
+}
+
+func TestConfig_UIAPIKeys_Invalid(t *testing.T) {
+	// uiApiKeys is validated the same way as apiKeys, with its own field name
+	// in the error so a typo is easy to place.
+	tests := []struct {
+		name        string
+		content     string
+		expectedErr string
+	}{
+		{
+			name:        "empty string",
+			content:     `uiApiKeys: [""]`,
+			expectedErr: "empty api key found in uiApiKeys",
+		},
+		{
+			name:        "contains a space",
+			content:     `uiApiKeys: ["ui key"]`,
+			expectedErr: "uiApiKeys[0]: api key cannot contain spaces",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfigFromReader(strings.NewReader(tt.content))
+			if assert.Error(t, err) {
+				assert.Equal(t, tt.expectedErr, err.Error())
+			}
+		})
+	}
+}
+
+// TestConfig_InferenceAndUIAPIKeys pins the derivation rules the auth
+// middleware relies on: apiKeys and uiApiKeys are independent config keys,
+// but the two effective key sets they produce overlap in one direction only
+// — a UI key also authorizes inference, never the reverse.
+func TestConfig_InferenceAndUIAPIKeys(t *testing.T) {
+	t.Run("neither set: both empty", func(t *testing.T) {
+		var c Config
+		assert.Empty(t, c.InferenceAPIKeys())
+		assert.Empty(t, c.UIAPIKeys())
+	})
+
+	t.Run("apiKeys only: both surfaces share the single key (pre-uiApiKeys behavior)", func(t *testing.T) {
+		c := Config{RequiredAPIKeys: []string{"shared"}}
+		assert.Equal(t, []string{"shared"}, c.InferenceAPIKeys())
+		assert.Equal(t, []string{"shared"}, c.UIAPIKeys())
+	})
+
+	t.Run("uiApiKeys only: it also authorizes inference", func(t *testing.T) {
+		c := Config{UIRequiredAPIKeys: []string{"ui-only"}}
+		assert.Equal(t, []string{"ui-only"}, c.InferenceAPIKeys())
+		assert.Equal(t, []string{"ui-only"}, c.UIAPIKeys())
+	})
+
+	t.Run("both set: UI surface is uiApiKeys ONLY, inference surface is the union", func(t *testing.T) {
+		c := Config{
+			RequiredAPIKeys:   []string{"inference-key"},
+			UIRequiredAPIKeys: []string{"ui-key"},
+		}
+		assert.Equal(t, []string{"ui-key"}, c.UIAPIKeys(),
+			"an inference-only apiKeys entry must not appear in the UI's accepted keys")
+		assert.Equal(t, []string{"inference-key", "ui-key"}, c.InferenceAPIKeys(),
+			"inference must accept both its own key and a UI key")
+	})
+}
+
 func TestConfig_GlobalTTL(t *testing.T) {
 	t.Run("globalTTL sets default for models", func(t *testing.T) {
 		content := `

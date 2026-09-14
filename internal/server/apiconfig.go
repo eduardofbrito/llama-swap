@@ -19,15 +19,18 @@ import (
 // Access control matters more here than on the rest of the API: a caller that
 // can write a model block can choose that model's `cmd` and then start it with
 // a plain GET /upstream/<id>/, which is arbitrary command execution on the
-// host. Two gates therefore guard every handler below, on top of the API auth
-// chain they are mounted on:
+// host. Two gates therefore guard every handler below, on top of the UI auth
+// chain they are mounted on (see routes(): these are the /api/config/*
+// handlers, part of the dashboard's control plane, gated by
+// config.Config.UIAPIKeys):
 //
 //  1. the operator must opt in with -enable-config-api (which also requires a
 //     single -config file); without it s.configPath is empty and the endpoints
 //     report 501, and
-//  2. the config must declare at least one apiKey. The auth middleware is a
-//     deliberate pass-through when no keys are configured, so without this
-//     check the opt-in alone would publish an unauthenticated write surface.
+//  2. the config must declare at least one UI key (uiApiKeys, or apiKeys as
+//     its fallback). The auth middleware is a deliberate pass-through when no
+//     keys are configured, so without this check the opt-in alone would
+//     publish an unauthenticated write surface.
 
 // configEditingStatus reports whether config editing is available, and why not
 // when it is unavailable. The HTTP status is the one a config endpoint answers
@@ -37,9 +40,9 @@ func (s *Server) configEditingStatus() (editable bool, status int, reason string
 		return false, http.StatusNotImplemented,
 			"config editing is disabled; start llama-swap with -enable-config-api and a single -config file to turn it on"
 	}
-	if len(s.Cfg().RequiredAPIKeys) == 0 {
+	if len(s.Cfg().UIAPIKeys()) == 0 {
 		return false, http.StatusForbidden,
-			"config editing requires authentication; add at least one entry under apiKeys in the config file"
+			"config editing requires authentication; add at least one entry under uiApiKeys (or apiKeys) in the config file"
 	}
 	return true, http.StatusOK, ""
 }

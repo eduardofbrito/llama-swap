@@ -5,18 +5,31 @@ import (
 	"strings"
 
 	"github.com/mostlygeek/llama-swap/internal/chain"
+	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
 
 // CreateAuthMiddleware returns middleware that validates API keys when the
-// config declares any. It accepts the key via Authorization: Bearer,
-// Authorization: Basic (password field), or x-api-key. When no keys are
-// configured the middleware is a pass-through. Keys are read per request so
-// a surgical reload of the config is honored without rebuilding the chain.
-func CreateAuthMiddleware(cfg ConfigAt) chain.Middleware {
+// selected set declares any. keysFor picks which key set a route group
+// checks — config.Config.InferenceAPIKeys for model dispatch/upstream/
+// comfyui, config.Config.UIAPIKeys for the dashboard and its control plane —
+// so the same middleware constructor serves both without duplicating the
+// matching logic. It accepts the key via Authorization: Bearer,
+// Authorization: Basic (password field), or x-api-key. When the selected set
+// is empty the middleware is a pass-through. Keys (and which set applies) are
+// read per request, so a surgical reload of the config is honored without
+// rebuilding the chain.
+//
+// Both call sites use the same WWW-Authenticate realm ("llama-swap") on
+// purpose: a browser that authenticates once (e.g. loading /ui/) reuses those
+// cached credentials for every same-origin request under that realm,
+// including the Playground's own inference calls — which is what lets a
+// single dashboard login also drive chat/completions without a second
+// prompt, given InferenceAPIKeys already accepts a UI key.
+func CreateAuthMiddleware(cfg ConfigAt, keysFor func(config.Config) []string) chain.Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			keys := cfg().RequiredAPIKeys
+			keys := keysFor(*cfg())
 			if len(keys) == 0 {
 				next.ServeHTTP(w, r)
 				return

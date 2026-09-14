@@ -3,8 +3,8 @@ title: API keys, access control, and keeping secrets out of your config
 summary: apiKeys authentication has no per-key rate limits or user permissions; use env macros for secrets.
 category: guides
 tags: [security, api-keys, auth, secrets, env, rate-limit, users, permissions, access-control]
-config_keys: [apiKeys, macros, peers.*.apiKey, models.*.env]
-updated: 2026-08-25
+config_keys: [apiKeys, uiApiKeys, macros, peers.*.apiKey, models.*.env]
+updated: 2026-09-14
 ---
 
 # API keys and keeping secrets out of your config
@@ -20,7 +20,10 @@ apiKeys:
 ```
 
 Clients may present it as `Authorization: Bearer <key>`, `x-api-key: <key>`, or
-HTTP Basic. The web UI and everything under `/api/` are covered too.
+HTTP Basic. `apiKeys` gates the inference endpoints (model dispatch,
+`/upstream`, `/comfyui`) and, when `uiApiKeys` is unset, the web UI and
+everything under `/api/` too — see [Separate keys for the UI](#separate-keys-for-the-ui)
+below if you want those to require a different key.
 
 Generate a real one:
 
@@ -31,9 +34,9 @@ $ printf "sk-%s\n" "$(head -c 48 /dev/urandom | base64)"
 Multiple keys are allowed, which is how you rotate without downtime: add the
 new key, move clients over, remove the old one.
 
-All keys are equivalent. llama-swap has no per-key rate limiting, user
-accounts, roles, or per-key permissions. Put a reverse proxy or API gateway in
-front of llama-swap when you need those controls.
+All keys are equivalent within their set. llama-swap has no per-key rate
+limiting, user accounts, roles, or per-key permissions. Put a reverse proxy or
+API gateway in front of llama-swap when you need those controls.
 
 **`apiKeys` is not a substitute for a firewall.** llama-swap starts processes
 on your machine. Do not expose it to the internet on the strength of a bearer
@@ -69,6 +72,38 @@ models:
     cmd: llama-server --port ${PORT} -hf some/repo
 ```
 
+## Separate keys for the UI
+
+By default one key set (`apiKeys`) gates everything: inference and the
+dashboard/control-plane alike. Add `uiApiKeys` to split them:
+
+```yaml
+apiKeys:
+  - "${env.LLAMA_SWAP_INFERENCE_KEY}" # for LiteLLM, apps, external clients
+
+uiApiKeys:
+  - "${env.LLAMA_SWAP_UI_KEY}" # for operators logging into the dashboard
+```
+
+With both set:
+
+- `uiApiKeys` gates the dashboard, `/api/*` (including the config-editing
+  endpoints), `/logs`, `/metrics`, `/unload`, `/running`.
+- `apiKeys` gates inference only (model dispatch, `/upstream`, `/comfyui`).
+- A `uiApiKeys` key **also** works for inference — a dashboard login can drive
+  the Playground's real chat/completions calls without a second key.
+- An `apiKeys` (inference-only) key does **not** open the UI once `uiApiKeys`
+  is set. This is the point: hand an external client an inference-only key
+  that cannot unload models or edit the config file, while operators keep a
+  separate, stronger key.
+
+Leave `uiApiKeys` empty (the default) and it falls back to `apiKeys` — an
+existing config that only ever set `apiKeys` keeps gating the UI exactly as it
+did before `uiApiKeys` existed.
+
+`-enable-config-api` follows `uiApiKeys` (falling back to `apiKeys`) for its
+own key requirement, since the config-editing endpoints live under `/api/`.
+
 ## How peer keys are used
 
 `peers.*.apiKey` is injected into outgoing requests to that peer, as **both**
@@ -82,7 +117,7 @@ This is the key llama-swap presents *to* the peer. It is unrelated to the
 
 Worth being aware of, because config files get pasted into issues and chats:
 
-- `apiKeys` — literal keys, unless you used env macros
+- `apiKeys` / `uiApiKeys` — literal keys, unless you used env macros
 - `peers.*.apiKey` — literal peer keys, same
 - `models.*.env` — literal `NAME=value` pairs
 - `models.*.cmd` / `cmdStop` — full command lines, which often carry
@@ -98,5 +133,5 @@ the problem survives.
 
 ## Related
 
-- `reference/config/apiKeys`, `reference/config/peers`
+- `reference/config/apiKeys`, `reference/config/uiApiKeys`, `reference/config/peers`
 - `guides/configuration/macros` — how env macros resolve

@@ -233,7 +233,24 @@ type Config struct {
 	IncludeAliasesInList bool `yaml:"includeAliasesInList"`
 
 	// support API keys, see issue #433, #50, #251
+	// RequiredAPIKeys are the keys accepted for inference requests: model
+	// dispatch, /upstream and /comfyui. See InferenceAPIKeys.
 	RequiredAPIKeys []string `yaml:"apiKeys"`
+
+	// UIRequiredAPIKeys are the keys accepted for the web UI and its
+	// control-plane endpoints — the dashboard, everything under /api/,
+	// /logs, /metrics, /unload, /running. A UI key is also accepted for
+	// inference requests (see InferenceAPIKeys), so a browser session signed
+	// into the dashboard can drive the Playground's real chat/completions
+	// calls without knowing a second key.
+	//
+	// When empty, UI access falls back to RequiredAPIKeys (apiKeys) — the
+	// same single shared key gating everything that existed before this
+	// field, so an existing config's behavior does not change. Set this to
+	// hand an external client (LiteLLM, an app) an inference-only apiKeys
+	// entry that cannot open the dashboard, unload models, or edit the
+	// config file, while keeping a separate, stronger key for operators.
+	UIRequiredAPIKeys []string `yaml:"uiApiKeys"`
 
 	// support remote peers, see issue #433, #296
 	Peers PeerDictionaryConfig `yaml:"peers"`
@@ -355,6 +372,40 @@ type RouterConfig struct {
 type RouterSettings struct {
 	Groups map[string]GroupConfig `yaml:"groups"`
 	Matrix *MatrixConfig          `yaml:"matrix"`
+}
+
+// InferenceAPIKeys returns the keys accepted for inference requests: model
+// dispatch, /upstream and /comfyui. It is apiKeys plus uiApiKeys, so a
+// browser session authenticated against the dashboard (with a uiApiKeys
+// entry) can also drive the Playground's real inference calls, without the
+// operator having to hand the browser a second, inference-scoped key.
+//
+// When uiApiKeys is empty this is exactly apiKeys — unchanged from before
+// uiApiKeys existed.
+func (c Config) InferenceAPIKeys() []string {
+	if len(c.UIRequiredAPIKeys) == 0 {
+		return c.RequiredAPIKeys
+	}
+	keys := make([]string, 0, len(c.RequiredAPIKeys)+len(c.UIRequiredAPIKeys))
+	keys = append(keys, c.RequiredAPIKeys...)
+	keys = append(keys, c.UIRequiredAPIKeys...)
+	return keys
+}
+
+// UIAPIKeys returns the keys accepted for the web UI and its control-plane
+// endpoints (the dashboard, everything under /api/, /logs, /metrics,
+// /unload, /running). It is uiApiKeys when set; otherwise it falls back to
+// apiKeys, so a config that only ever set apiKeys keeps gating the dashboard
+// exactly as it did before uiApiKeys existed — one shared key for
+// everything.
+//
+// An inference-only apiKeys entry does NOT, by itself, grant UI access once
+// uiApiKeys is set: that is the point of separating the two.
+func (c Config) UIAPIKeys() []string {
+	if len(c.UIRequiredAPIKeys) > 0 {
+		return c.UIRequiredAPIKeys
+	}
+	return c.RequiredAPIKeys
 }
 
 func (c *Config) RealModelName(search string) (string, bool) {
