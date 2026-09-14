@@ -728,6 +728,17 @@ RUN set -eux; \
 # --- Kokoro (TTS) ------------------------------------------------------------
 # Servidor OpenAI-compativel: /v1/audio/speech e /v1/audio/voices. Aceita
 # --host/--port porque quem sobe e o uvicorn.
+#
+# MODEL_DIR/VOICES_DIR: o Kokoro-FastAPI tem esses caminhos HARDCODED como
+# default em api/src/core/config.py ("/app/api/src/models",
+# "/app/api/src/voices/v1_0") — pensados pra imagem oficial deles, onde o
+# app mora em /app. Aqui o app fica em /opt/kokoro/app (isolado do resto),
+# entao sem sobrescrever essas duas env vars o processo sobe, procura o
+# modelo em /app/... (que nao existe nesta imagem) e morre com
+# "Model files not found" mesmo com o .pth baixado no build. Pydantic-settings
+# le as env vars direto, sem prefixo, casando por nome de forma
+# case-insensitive — e o campo e device_type, nao device (DEVICE=gpu era
+# ignorado em silencio, e o device ficava por conta do auto-detect).
 RUN set -eux; \
     if [ "$WITH_KOKORO" != "1" ] || [ ! -x /opt/kokoro/venv/bin/python ]; then echo "sem Kokoro nesta imagem"; exit 0; fi; \
     printf '%s\n' \
@@ -737,7 +748,9 @@ RUN set -eux; \
       'set -eu' \
       'cd /opt/kokoro/app' \
       'export PYTHONPATH="/opt/kokoro/app:/opt/kokoro/app/api${PYTHONPATH:+:$PYTHONPATH}"' \
-      'export USE_GPU="${USE_GPU:-true}" DEVICE="${DEVICE:-gpu}"' \
+      'export MODEL_DIR="${MODEL_DIR:-/opt/kokoro/app/api/src/models}"' \
+      'export VOICES_DIR="${VOICES_DIR:-/opt/kokoro/app/api/src/voices/v1_0}"' \
+      'export USE_GPU="${USE_GPU:-true}" DEVICE_TYPE="${DEVICE_TYPE:-cuda}"' \
       'export PHONEMIZER_ESPEAK_PATH="${PHONEMIZER_ESPEAK_PATH:-/usr/bin}"' \
       'export PHONEMIZER_ESPEAK_DATA="${PHONEMIZER_ESPEAK_DATA:-/usr/share/espeak-ng-data}"' \
       'export ESPEAK_DATA_PATH="${ESPEAK_DATA_PATH:-/usr/share/espeak-ng-data}"' \
