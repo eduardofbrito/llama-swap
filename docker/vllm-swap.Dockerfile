@@ -24,16 +24,16 @@
 #
 # Build:
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
-#   # reprodutivel no commit atual do fork (main, checado em 2026-09-14):
+#   # reprodutivel no commit atual do fork (main, checado em 2026-09-15):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482 -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
 #
 # O llama-swap e COMPILADO a partir do fork eduardofbrito/llama-swap,
 # porque as features dele nao estao em nenhuma release upstream
-# (commits 8f2b0b2..cfbce3c, todos em main; HEAD checado em 2026-09-14):
+# (commits 8f2b0b2..106591a, todos em main; HEAD checado em 2026-09-15):
 #   - seletor de GPU por modelo + pagina GPUs na UI
 #   - aba Conf: edicao do config.yaml pela UI (ver --enable-config-api abaixo)
 #   - manualOnly: modelo que nunca carrega sob demanda (503 rapido)
@@ -48,8 +48,10 @@
 #     deste arquivo: precisa de VLLM_SERVER_DEV_MODE=1 e --enable-sleep-mode
 #   - uiApiKeys: chave separada pro dashboard/API de controle, distinta da
 #     chave de inferencia (ver --enable-config-api abaixo)
-#   (3 commits novos desde o pin anterior, 56bea6b: separacao apiKeys/uiApiKeys,
-#   correcao dos caminhos do Kokoro no wrapper, e o sleepMode)
+#   (5 commits novos desde o pin anterior, 56bea6b: separacao
+#   apiKeys/uiApiKeys, correcao dos caminhos do Kokoro no wrapper, o sleepMode,
+#   uiApiKeys deixando de trancar a inferencia, e a correcao do vramCheck
+#   abaixo)
 # Build em estagios:
 #   1. node:24-slim   -> build da UI (Svelte/Vite)
 #   2. golang:1.27.1  -> go build -tags embed_ui (UI embutida no binario)
@@ -157,7 +159,7 @@ ARG TORCH_INDEX_URL=
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c
+ARG LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482
 
 RUN set -eux; \
     apt-get update; \
@@ -176,7 +178,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c
+ARG LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
@@ -868,7 +870,13 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 #     env: ["CUDA_VISIBLE_DEVICES=0", "VLLM_SERVER_DEV_MODE=1"]
 #     sleepMode: true
 #     ttl: 3600
-#     vramMB: 30000
+#     # vramMB: com vramCheck ligado, DECLARE. O vLLM reserva
+#     # --gpu-memory-utilization x a placa no boot, entao o numero e essa conta
+#     # (0.90 de uma H100 ~79,6 GiB = ~73400), nao o tamanho dos pesos. Nao
+#     # conte com a medicao automatica quando o modelo tem sleepMode: um wake
+#     # de segundos nao move a amostra de GPU e nada e gravado. Ver a secao do
+#     # vramCheck mais abaixo.
+#     vramMB: 73400
 #
 #   # ATENCAO de seguranca: VLLM_SERVER_DEV_MODE=1 monta, alem do sleep,
 #   # endpoints administrativos (/collective_rpc, /reset_prefix_cache) na porta
@@ -1019,13 +1027,32 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 # pagina Models e para de contar na GPU dele (ele nao segura VRAM nenhuma),
 # entao uma placa cujo unico modelo dorme aparece como idle.
 #
-# Com vramCheck ligado, declare models.<id>.vramMB nos modelos grandes. Sem
-# numero declarado NEM medido o modelo e sempre admitido (o guard nunca recusa
-# por ignorancia), entao ate o primeiro load bem-sucedido a checagem nao faz
-# nada para aquele modelo. O valor medido sai do ultimo load e e gravado no
-# sqlite; sem store.path o banco e em memoria e a medicao morre com o
-# processo. Para a medicao sobreviver, aponte store.path para dentro de
-# /cache (que ja e volume):
+# Com vramCheck ligado, DECLARE models.<id>.vramMB nos modelos grandes — e nao
+# conte com a medicao automatica, ainda mais nesta imagem.
+#
+# A regra "sem numero declarado NEM medido, admite" vale para o modelo que esta
+# entrando E para os que estao saindo: se o que vai ser despejado nao tem
+# tamanho conhecido, a memoria livre depois do swap e DESCONHECIDA (nao zero),
+# e o guard admite em vez de chutar. Ou seja: o vramCheck so protege uma placa
+# de verdade quando todo modelo que pousa nela tem vramMB.
+#
+# Por que nao confiar na medicao automatica aqui: ela e a subida de memoria da
+# GPU durante o load, lida do ring amostrado a cada `performance.every`. Um
+# swap que termina DENTRO de um periodo de amostragem ve a mesma amostra nas
+# duas pontas, calcula subida zero e nao grava nada. Com sleepMode isso vira
+# regra e nao excecao — um wake leva segundos. Wakes, alias, nao sao medidos de
+# proposito: restaurar pesos e uma grandeza diferente de um load frio, e um
+# numero errado e pior que nenhum porque o guard confia nele. Rode com
+# logLevel: debug pra ver "no VRAM measurement for <modelo>" e o motivo.
+#
+# Numeros faceis de derivar sem medir nada: vramMB ~= --gpu-memory-utilization
+# x memoria da placa (o vLLM reserva a fracao no boot, independente do tamanho
+# dos pesos). Numa H100 de ~79,6 GiB: 0.85 -> ~69300, 0.90 -> ~73400,
+# 0.92 (default) -> ~75000.
+#
+# O valor medido, quando existe, sai do ultimo load frio e e gravado no sqlite;
+# sem store.path o banco e em memoria e a medicao morre com o processo. Para
+# sobreviver, aponte store.path para dentro de /cache (que ja e volume):
 #
 #   store:
 #     path: /cache/llama-swap.db
