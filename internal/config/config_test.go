@@ -952,9 +952,14 @@ func TestConfig_UIAPIKeys_Invalid(t *testing.T) {
 }
 
 // TestConfig_InferenceAndUIAPIKeys pins the derivation rules the auth
-// middleware relies on: apiKeys and uiApiKeys are independent config keys,
-// but the two effective key sets they produce overlap in one direction only
-// — a UI key also authorizes inference, never the reverse.
+// middleware relies on. Two rules, and they are not symmetric:
+//
+//   - apiKeys alone decides whether INFERENCE is gated. uiApiKeys widens the
+//     accepted set once it is, but never turns the gate on by itself.
+//   - uiApiKeys decides the UI surface, falling back to apiKeys when unset.
+//
+// The overlap runs one way: a UI key also authorizes inference, never the
+// reverse.
 func TestConfig_InferenceAndUIAPIKeys(t *testing.T) {
 	t.Run("neither set: both empty", func(t *testing.T) {
 		var c Config
@@ -968,9 +973,15 @@ func TestConfig_InferenceAndUIAPIKeys(t *testing.T) {
 		assert.Equal(t, []string{"shared"}, c.UIAPIKeys())
 	})
 
-	t.Run("uiApiKeys only: it also authorizes inference", func(t *testing.T) {
+	// The regression this function exists for. Locking the dashboard on an
+	// instance whose inference is deliberately open must not start rejecting
+	// every client that was already pointed at it: an empty result is what the
+	// middleware reads as "not gated", and apiKeys — empty here — is the only
+	// switch for that.
+	t.Run("uiApiKeys only: UI is gated, inference stays OPEN", func(t *testing.T) {
 		c := Config{UIRequiredAPIKeys: []string{"ui-only"}}
-		assert.Equal(t, []string{"ui-only"}, c.InferenceAPIKeys())
+		assert.Empty(t, c.InferenceAPIKeys(),
+			"uiApiKeys must not gate inference on its own; apiKeys is that switch")
 		assert.Equal(t, []string{"ui-only"}, c.UIAPIKeys())
 	})
 

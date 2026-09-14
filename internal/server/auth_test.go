@@ -205,6 +205,53 @@ func TestServer_AuthMiddleware_UIKeyFallback(t *testing.T) {
 	}
 }
 
+// TestServer_UIOnlyKeysLeaveInferenceOpen drives the real mux for the
+// configuration an internal instance actually wants: lock the dashboard (so
+// the config editor is usable) without making every inference client that was
+// already pointed at this server start failing with 401.
+//
+// This is the end-to-end form of the uiApiKeys-only rule — it is easy to state
+// in config.InferenceAPIKeys and just as easy to undo by changing which key
+// set a route is wired to, which is why it is pinned here against the routes
+// rather than only against the config method.
+func TestServer_UIOnlyKeysLeaveInferenceOpen(t *testing.T) {
+	cfg := config.Config{
+		UIRequiredAPIKeys: []string{"ui-key"}, // apiKeys deliberately unset
+		Models:            map[string]config.ModelConfig{config.ComfyUIModelID: {}},
+	}
+	local := newStubRouter([]string{config.ComfyUIModelID}, "ok")
+	s := newTestServerWithConfig(cfg, local, newStubRouter(nil, ""))
+
+	get := func(path, key string) int {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		if key != "" {
+			r.Header.Set("Authorization", "Bearer "+key)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	for _, path := range []string{"/v1/models", "/comfyui/", "/upstream/foo/"} {
+		t.Run("inference "+path+" stays open without a key", func(t *testing.T) {
+			if got := get(path, ""); got == http.StatusUnauthorized {
+				t.Errorf("status = 401; setting only uiApiKeys must not gate inference")
+			}
+		})
+	}
+
+	for _, path := range []string{"/ui/", "/api/version", "/api/gpus"} {
+		t.Run("UI "+path+" is gated", func(t *testing.T) {
+			if got := get(path, ""); got != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", got)
+			}
+			if got := get(path, "ui-key"); got == http.StatusUnauthorized {
+				t.Errorf("status = 401 with the UI key; it must open the dashboard")
+			}
+		})
+	}
+}
+
 // TestServer_RouteAuthSeparation drives the real mux (routes() wires it, not
 // a middleware built in isolation) to pin exactly which key set each family
 // of endpoints accepts, once both apiKeys and uiApiKeys are configured with

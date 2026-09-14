@@ -101,6 +101,32 @@ Leave `uiApiKeys` empty (the default) and it falls back to `apiKeys` — an
 existing config that only ever set `apiKeys` keeps gating the UI exactly as it
 did before `uiApiKeys` existed.
 
+### Lock the dashboard, leave inference open
+
+The other single-key case is worth calling out, because it is the one that
+makes `-enable-config-api` usable on an instance that deliberately serves
+inference without authentication:
+
+```yaml
+uiApiKeys:
+  - "${env.LLAMA_SWAP_UI_KEY}"
+# apiKeys stays unset
+```
+
+**`apiKeys` alone decides whether inference is gated.** Setting `uiApiKeys`
+never turns that gate on by itself, so every client already pointed at this
+server keeps working unauthenticated while the dashboard, `/api/*` and the
+config editor start requiring a key.
+
+The two rules are not symmetric, and that is deliberate:
+
+| `apiKeys` | `uiApiKeys` | Inference | UI / `/api/*` |
+|---|---|---|---|
+| unset | unset | open | open |
+| set | unset | `apiKeys` | `apiKeys` |
+| unset | set | **open** | `uiApiKeys` |
+| set | set | both keys | `uiApiKeys` |
+
 `-enable-config-api` follows `uiApiKeys` (falling back to `apiKeys`) for its
 own key requirement, since the config-editing endpoints live under `/api/`.
 

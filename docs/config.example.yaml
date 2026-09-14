@@ -178,9 +178,12 @@ apiKeys:
 # - optional, default: []
 # - when empty (the default), falls back to apiKeys — a config that only ever
 #   set apiKeys keeps gating the UI exactly as it did before uiApiKeys existed
-# - a uiApiKeys key also works for inference, so a dashboard login can drive
-#   the Playground's chat/completions calls without a second key
+# - a uiApiKeys key also works for inference when inference is gated, so a
+#   dashboard login can drive the Playground without a second key
 # - an apiKeys-only (inference) key does NOT open the UI once uiApiKeys is set
+# - setting uiApiKeys NEVER gates inference on its own — apiKeys alone is that
+#   switch. So uiApiKeys with no apiKeys locks the dashboard (and the config
+#   editor) while leaving inference open to the clients already pointed here
 # - set this to hand an external client (LiteLLM, an app) an inference-only
 #   apiKeys entry that cannot open the dashboard, unload models, or edit the
 #   config file, while keeping a separate, stronger key for operators

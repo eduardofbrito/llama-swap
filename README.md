@@ -58,6 +58,8 @@ Features added in this fork on top of upstream `main`:
 > A caller that can write a model block chooses that model's `cmd` and can then start it, which is arbitrary command execution on the host. The editing endpoints are therefore gated twice:
 > 1. start llama-swap with `-enable-config-api` (and a single `-config` file); otherwise they return **501**, and
 > 2. configure at least one key under `uiApiKeys` (or `apiKeys` as its fallback); otherwise they return **403**. llama-swap's auth middleware is a deliberate pass-through when no keys are set, so this second gate is what keeps the opt-in from publishing an unauthenticated write surface.
+>
+> Setting `uiApiKeys` alone is enough, and it does **not** gate inference — `apiKeys` alone decides that. So an instance that serves inference without authentication can still lock the dashboard and use the config editor, without breaking the clients already pointed at it.
 
 ## Features:
 

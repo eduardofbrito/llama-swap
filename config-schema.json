@@ -711,7 +711,7 @@
                 "minLength": 1
             },
             "default": [],
-            "description": "Require an API key for the web UI and its control-plane endpoints (dashboard, /api/*, /logs, /metrics, /unload, /running). A uiApiKeys key is also accepted for inference requests, so a dashboard login can drive the Playground. When empty, falls back to apiKeys — an existing config with only apiKeys keeps gating the UI exactly as before. Each key is a non-empty string."
+            "description": "Require an API key for the web UI and its control-plane endpoints (dashboard, /api/*, /logs, /metrics, /unload, /running). A uiApiKeys key is also accepted for inference requests when inference is gated, so a dashboard login can drive the Playground. Setting this never gates inference on its own — apiKeys alone does that — so uiApiKeys with no apiKeys locks the dashboard and leaves inference open. When empty, falls back to apiKeys, so an existing config with only apiKeys keeps gating the UI exactly as before. Each key is a non-empty string."
         },
         "tailcat": {
             "type": "object",

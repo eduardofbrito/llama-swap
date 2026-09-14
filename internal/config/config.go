@@ -240,9 +240,15 @@ type Config struct {
 	// UIRequiredAPIKeys are the keys accepted for the web UI and its
 	// control-plane endpoints — the dashboard, everything under /api/,
 	// /logs, /metrics, /unload, /running. A UI key is also accepted for
-	// inference requests (see InferenceAPIKeys), so a browser session signed
-	// into the dashboard can drive the Playground's real chat/completions
-	// calls without knowing a second key.
+	// inference requests when inference is gated at all (see
+	// InferenceAPIKeys), so a browser session signed into the dashboard can
+	// drive the Playground's real chat/completions calls without knowing a
+	// second key.
+	//
+	// Setting this NEVER gates inference on its own — apiKeys alone decides
+	// that. Setting only uiApiKeys locks the dashboard and leaves inference
+	// open, which is what an internal instance with clients already pointed
+	// at it wants when it just needs the config editor.
 	//
 	// When empty, UI access falls back to RequiredAPIKeys (apiKeys) — the
 	// same single shared key gating everything that existed before this
@@ -375,14 +381,26 @@ type RouterSettings struct {
 }
 
 // InferenceAPIKeys returns the keys accepted for inference requests: model
-// dispatch, /upstream and /comfyui. It is apiKeys plus uiApiKeys, so a
-// browser session authenticated against the dashboard (with a uiApiKeys
-// entry) can also drive the Playground's real inference calls, without the
-// operator having to hand the browser a second, inference-scoped key.
+// dispatch, /upstream and /comfyui. An empty result means inference is not
+// gated at all, which is what the auth middleware reads as "pass everything
+// through".
 //
-// When uiApiKeys is empty this is exactly apiKeys — unchanged from before
-// uiApiKeys existed.
+// apiKeys alone decides WHETHER inference is gated. uiApiKeys only widens the
+// accepted set once it is, so that a browser session authenticated against the
+// dashboard can drive the Playground's real inference calls without the
+// operator handing it a second, inference-scoped key.
+//
+// The order matters, and getting it wrong is how this went wrong once: making
+// the result the plain union meant that setting uiApiKeys on an instance with
+// no apiKeys silently started rejecting every inference client, because a
+// non-empty union is what turns the gate on. "Lock the dashboard, leave
+// inference open" is a real configuration — an internal instance with clients
+// already pointed at it — and apiKeys is documented as the switch for
+// inference, so uiApiKeys must not flip it.
 func (c Config) InferenceAPIKeys() []string {
+	if len(c.RequiredAPIKeys) == 0 {
+		return nil
+	}
 	if len(c.UIRequiredAPIKeys) == 0 {
 		return c.RequiredAPIKeys
 	}
