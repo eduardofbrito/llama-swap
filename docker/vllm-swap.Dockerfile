@@ -24,25 +24,32 @@
 #
 # Build:
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
-#   # reprodutivel no commit atual do fork (main, checado em 2026-09-13):
+#   # reprodutivel no commit atual do fork (main, checado em 2026-09-14):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121 -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
 #
 # O llama-swap e COMPILADO a partir do fork eduardofbrito/llama-swap,
 # porque as features dele nao estao em nenhuma release upstream
-# (commits 8f2b0b2..56bea6b, todos em main; HEAD checado em 2026-09-13):
+# (commits 8f2b0b2..cfbce3c, todos em main; HEAD checado em 2026-09-14):
 #   - seletor de GPU por modelo + pagina GPUs na UI
 #   - aba Conf: edicao do config.yaml pela UI (ver --enable-config-api abaixo)
 #   - manualOnly: modelo que nunca carrega sob demanda (503 rapido)
 #   - recentPoolSize: pool LRU, carregar um modelo nao derruba todos os outros
 #   - vramCheck: recusa load quando a GPU nao tem memoria livre suficiente
 #   - grupos com `gpus`: distribui os membros entre GPUs, um por device
-#   (3 commits novos desde o pin anterior, 8aa0580: GPU memory ao vivo na
-#   pagina GPUs, a propria imagem Docker vLLM-based deste fork, e um
-#   .dockerignore pra builds com contexto na raiz do repo)
+#   - sleepMode: despejo poe o modelo pra dormir em vez de matar — o processo
+#     fica vivo com os pesos na RAM do host e a proxima request ACORDA ele em
+#     segundos. E a feature que mais muda a vida nesta imagem, porque um start
+#     de vLLM grande custa minutos (spawn + pesos + torch.compile + CUDA graphs
+#     + warmup) e o wake pula tudo menos a copia. Ver o bloco de exemplo no fim
+#     deste arquivo: precisa de VLLM_SERVER_DEV_MODE=1 e --enable-sleep-mode
+#   - uiApiKeys: chave separada pro dashboard/API de controle, distinta da
+#     chave de inferencia (ver --enable-config-api abaixo)
+#   (3 commits novos desde o pin anterior, 56bea6b: separacao apiKeys/uiApiKeys,
+#   correcao dos caminhos do Kokoro no wrapper, e o sleepMode)
 # Build em estagios:
 #   1. node:24-slim   -> build da UI (Svelte/Vite)
 #   2. golang:1.27.1  -> go build -tags embed_ui (UI embutida no binario)
@@ -150,7 +157,7 @@ ARG TORCH_INDEX_URL=
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121
+ARG LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c
 
 RUN set -eux; \
     apt-get update; \
@@ -169,7 +176,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=56bea6bb90e749e3877e3eb1eec017d03c6e4121
+ARG LLAMA_SWAP_REF=cfbce3cfe02c3a90240b0217b16e34963f54d59c
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
@@ -538,7 +545,13 @@ RUN set -eux; \
 
 # -----------------------------------------------------------------------------
 # 3) Verificacao — falha o build cedo, nao em producao as 3h
-#    numba e MTP apenas avisam; os demais bloqueiam.
+#    numba, MTP e sleep mode apenas avisam; os demais bloqueiam.
+#
+# O sleep mode so avisa porque e opt-in por modelo: sem ele a imagem funciona
+# igual, o llama-swap recebe 404 no /sleep e para o modelo como sempre fez —
+# perde-se a troca rapida, nada mais. Mas e melhor descobrir aqui do que
+# depois de configurar sleepMode: true e nao entender por que o swap continua
+# levando minutos.
 # -----------------------------------------------------------------------------
 RUN set -eux; \
     python3 -c "import sys; from importlib.metadata import version as v; from packaging.version import Version as V; a=v('vllm'); print('vllm:', a); sys.exit('FALHA: vllm '+a+' < $MIN_VLLM') if V(a)<V('$MIN_VLLM') else None"; \
@@ -546,6 +559,7 @@ RUN set -eux; \
     python3 -c "import fastsafetensors; print('fastsafetensors: OK')"; \
     python3 -c "from importlib.metadata import version as v; import numba; print('numba:', v('numba'), 'OK (numpy', v('numpy')+')')" || echo "AVISO: numba nao importa — vLLM funciona, alguns caminhos ficam mais lentos" >&2; \
     python3 -c "from importlib.metadata import version as v; from packaging.version import Version as V; print('AVISO: MTP indisponivel — mantenha --speculative-config COMENTADO' if V(v('vllm'))<V('$MTP_VLLM') else 'OK: MTP suportado — pode habilitar --speculative-config')"; \
+    python3 -c "import dataclasses, vllm.envs as e; from vllm.engine.arg_utils import EngineArgs; flag='enable_sleep_mode' in {f.name for f in dataclasses.fields(EngineArgs)}; dev=hasattr(e, 'VLLM_SERVER_DEV_MODE'); print('OK: sleep mode disponivel — models.*.sleepMode funciona com VLLM_SERVER_DEV_MODE=1 + --enable-sleep-mode' if (flag and dev) else 'AVISO: sleep mode indisponivel neste vLLM (--enable-sleep-mode=%s, VLLM_SERVER_DEV_MODE=%s) — sleepMode: true vai cair no fallback de parar o modelo' % (flag, dev))" || echo "AVISO: nao foi possivel verificar o sleep mode neste vLLM" >&2; \
     echo "=== requisitos verificados ==="
 
 # -----------------------------------------------------------------------------
@@ -827,6 +841,45 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 # host, porque quem fala com a rede e o proxy, nao o backend.
 #
 # models:
+#   # --- vLLM com sleep mode (a troca rapida) ---------------------------------
+#   # Os tres pedacos abaixo tem que estar TODOS presentes:
+#   #   env VLLM_SERVER_DEV_MODE=1  -> sem isso o vLLM nem monta /sleep e
+#   #                                  /wake_up, e o llama-swap leva 404
+#   #   --enable-sleep-mode         -> a flag que habilita o recurso no engine
+#   #   sleepMode: true             -> diz ao llama-swap pra DORMIR o modelo ao
+#   #                                  despeja-lo, em vez de mata-lo
+#   # Faltando qualquer um, nada quebra: o /sleep falha, o llama-swap loga e
+#   # para o modelo como sempre fez. Voce so perde a troca rapida.
+#   #
+#   # O que muda: despejado, o processo continua vivo com os pesos na RAM do
+#   # host e devolve a VRAM. A proxima request ACORDA ele — uma copia de volta
+#   # pra GPU — em vez de pagar spawn + pesos + torch.compile + CUDA graphs +
+#   # warmup de novo. Num modelo grande sao segundos no lugar de minutos.
+#   #
+#   # Custo: a RAM do host segura ~o tamanho dos pesos enquanto ele dorme. Dois
+#   # modelos de 30 GB dormindo sao 60 GB de RAM. O `ttl` abaixo e o que limita
+#   # isso: despejo dorme, mas TTL e unload explicito param o processo de vez.
+#   qwen3-27b-fp8:
+#     cmd: |
+#       vllm serve /models/Qwen3-27B-FP8 --host 127.0.0.1 --port ${PORT}
+#       --served-model-name qwen3-27b-fp8
+#       --load-format fastsafetensors
+#       --enable-sleep-mode
+#     env: ["CUDA_VISIBLE_DEVICES=0", "VLLM_SERVER_DEV_MODE=1"]
+#     sleepMode: true
+#     ttl: 3600
+#     vramMB: 30000
+#
+#   # ATENCAO de seguranca: VLLM_SERVER_DEV_MODE=1 monta, alem do sleep,
+#   # endpoints administrativos (/collective_rpc, /reset_prefix_cache) na porta
+#   # desse modelo. O llama-swap nao os expoe por conta propria, MAS o
+#   # passthrough /upstream/<model>/... alcanca qualquer caminho do backend —
+#   # entao quem tiver uma chave de inferencia valida alcanca esses endpoints
+#   # tambem. Por isso a env var fica POR MODELO aqui, e nao um ENV global da
+#   # imagem: so os modelos que realmente usam sleep mode ganham essa
+#   # superficie. Se a instancia for exposta alem da sua rede, considere
+#   # tambem separar as chaves com uiApiKeys (ver perto do ENTRYPOINT).
+#
 #   # --- llama.cpp -----------------------------------------------------------
 #   qwen3-30b-gguf:
 #     cmd: |
@@ -900,26 +953,38 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 # nunca escreve no arquivo, em nenhum dos dois casos.
 #
 # --enable-config-api liga os endpoints /api/config (aba Conf + dialogo Add
-# Model). ELES SO FUNCIONAM COM apiKeys CONFIGURADO no config.yaml:
+# Model). ELES SO FUNCIONAM COM CHAVE CONFIGURADA no config.yaml — uiApiKeys,
+# ou apiKeys como fallback:
 #
+#   # chave de inferencia: e o que LiteLLM e afins usam
 #   apiKeys:
-#     - sk-sua-chave-aqui
+#     - sk-inferencia-aqui
+#   # chave do dashboard e do /api/* (inclui a edicao de config). Quando
+#   # presente, a chave de apiKeys acima NAO abre mais a UI — que e o ponto:
+#   # o cliente externo nao consegue editar config nem descarregar modelos
+#   uiApiKeys:
+#     - sk-operador-aqui
 #
-# Sem apiKeys os endpoints respondem 403 e a UI esconde os dois controles — a
-# flag sozinha NAO expoe superficie de escrita sem autenticacao. O motivo do
-# gate duplo: quem consegue escrever um bloco de modelo escolhe o `cmd` dele e
-# depois pode inicia-lo, o que e execucao de comando arbitrario no host. Com
-# esta imagem esse poder cresceu: o `cmd` agora alcanca llama.cpp, Ollama,
-# ComfyUI e os dois TTS, nao so o vLLM. Remova a flag se voce nao quer editar o
-# config pela UI nesta imagem.
+# Sem nenhuma das duas os endpoints respondem 403 e a UI esconde os dois
+# controles — a flag sozinha NAO expoe superficie de escrita sem autenticacao.
+# O motivo do gate duplo: quem consegue escrever um bloco de modelo escolhe o
+# `cmd` dele e depois pode inicia-lo, o que e execucao de comando arbitrario no
+# host. Com esta imagem esse poder cresceu: o `cmd` agora alcanca llama.cpp,
+# Ollama, ComfyUI e os dois TTS, nao so o vLLM. Remova a flag se voce nao quer
+# editar o config pela UI nesta imagem.
+#
+# Se voce so definir apiKeys, o comportamento e o de antes: uma chave unica
+# para tudo. Separar passa a valer a pena quando alguma coisa externa tem a
+# chave de inferencia — ainda mais nesta imagem, onde modelos com
+# VLLM_SERVER_DEV_MODE=1 expoem endpoints administrativos via /upstream.
 #
 # O seletor de GPU da UI usa GET /api/gpus e o query param llama-swap-gpu; sem
 # GPU no host o seletor se oculta e o config.yaml continua mandando. Ele nao
 # depende de --enable-config-api.
 #
 # As features de GPU/scheduler sao todas opt-in pelo config.yaml e NAO mudam
-# nada por default. Para esta imagem (varias GPUs, vLLM pesado) as tres que
-# valem a pena avaliar sao:
+# nada por default. Para esta imagem (varias GPUs, vLLM pesado) as que valem a
+# pena avaliar sao:
 #
 #   routing:
 #     scheduler:
@@ -939,6 +1004,20 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
 #             # distribui os membros entre as GPUs, um por device
 #             gpus: ["0", "1"]
 #             members: [modelA, modelB, modelC]
+#
+# ... mais o models.<id>.sleepMode, que e por modelo (ver o exemplo de vLLM
+# acima). Os tres formam uma hierarquia de memoria e e assim que faz sentido
+# pensar neles nesta imagem, onde um start de vLLM custa minutos:
+#
+#   VRAM   <- recentPoolSize: os modelos mais quentes nem saem da placa
+#   RAM    <- sleepMode: os empurrados pra fora do pool dormem, wake em segundos
+#   morto  <- ttl: depois de ocioso o bastante, devolve a RAM tambem
+#
+# Vale dizer o que NAO dorme: unload explicito (botao da UI, /unload) e
+# expiracao de ttl param o processo de verdade. So o despejo — dar lugar a
+# outro modelo — e que dorme. Um modelo dormindo aparece como "sleeping" na
+# pagina Models e para de contar na GPU dele (ele nao segura VRAM nenhuma),
+# entao uma placa cujo unico modelo dorme aparece como idle.
 #
 # Com vramCheck ligado, declare models.<id>.vramMB nos modelos grandes. Sem
 # numero declarado NEM medido o modelo e sempre admitido (o guard nunca recusa
