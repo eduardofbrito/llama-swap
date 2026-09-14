@@ -100,6 +100,23 @@ type ModelConfig struct {
 	// Requests served while the model is already loaded still succeed.
 	ManualOnly bool `yaml:"manualOnly"`
 
+	// SleepMode changes what eviction means for this model: instead of being
+	// killed to make room for another, it is asked to release its GPU memory
+	// and stay alive, so the next request wakes it (weights copied back from
+	// host RAM) instead of paying for a full start. On a large model that is
+	// the difference between minutes and seconds.
+	//
+	// This drives vLLM's sleep-mode endpoints, so the upstream must be a vLLM
+	// started with VLLM_SERVER_DEV_MODE=1 in env and --enable-sleep-mode on
+	// the command. Without both, /sleep answers 404 and llama-swap falls back
+	// to stopping the model — correct, just not faster.
+	//
+	// The cost is host RAM: a sleeping model holds roughly its weight size in
+	// system memory until it wakes. Only eviction sleeps — an explicit unload
+	// and a ttl expiry still stop the process outright, so ttl is how you
+	// bound that.
+	SleepMode bool `yaml:"sleepMode"`
+
 	// VramMB is how much GPU memory (in MB) this model needs to load. It is
 	// the declared requirement and wins over the value llama-swap measured on
 	// the model's last successful load. Only consulted when

@@ -1,6 +1,6 @@
 export type ConnectionState = "connected" | "connecting" | "disconnected";
 
-export type ModelStatus = "ready" | "starting" | "stopping" | "stopped" | "shutdown" | "unknown";
+export type ModelStatus = "ready" | "starting" | "stopping" | "stopped" | "sleeping" | "shutdown" | "unknown";
 export type PlaygroundModelType = "model" | "peer" | "selector" | "profile";
 
 export interface ModelCapabilities {

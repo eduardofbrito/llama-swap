@@ -563,6 +563,11 @@
                         "default": false,
                         "description": "When true the model is never loaded on demand. Inference requests for it are answered immediately with HTTP 503 (manual_load_required) instead of starting or queueing a load, so upstream clients fail over to a fallback right away. The model still serves normally once loaded, and an operator can start it from the dashboard."
                     },
+                    "sleepMode": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, evicting this model to make room for another puts it to sleep instead of stopping it: the process stays alive with its weights in host RAM and releases its GPU memory, so the next request wakes it in seconds instead of paying for a full reload. Requires a vLLM upstream started with VLLM_SERVER_DEV_MODE=1 in env and --enable-sleep-mode on the command; without them /sleep answers 404 and llama-swap falls back to stopping the model. Costs roughly the model's weight size in host RAM while it sleeps. Only eviction sleeps — an explicit unload and a ttl expiry still stop the process."
+                    },
                     "sendLoadingState": {
                         "type": "boolean",
                         "description": "Overrides the global sendLoadingState for this model. Ommitting this property will use the global setting."

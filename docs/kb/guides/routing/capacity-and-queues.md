@@ -2,9 +2,9 @@
 title: Routing capacity and request queues
 summary: Configure concurrencyLimit and globalConcurrencyLimit, and understand queued work while a model is loading or busy.
 category: guides
-tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram, gpu-memory, oom, insufficient-vram]
-config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, models.*.vramMB, routing.scheduler.settings.fifo.recentPoolSize, routing.scheduler.settings.fifo.vramCheck, routing.scheduler.settings.fifo.vramMarginPct, routing.scheduler.settings.fifo.evictBeyondPoolOnPressure]
-updated: 2026-09-12
+tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram, gpu-memory, oom, insufficient-vram, sleep-mode, vllm, swap-latency, cold-start, wake]
+config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, models.*.vramMB, models.*.sleepMode, routing.scheduler.settings.fifo.recentPoolSize, routing.scheduler.settings.fifo.vramCheck, routing.scheduler.settings.fifo.vramMarginPct, routing.scheduler.settings.fifo.evictBeyondPoolOnPressure]
+updated: 2026-09-14
 ---
 
 # Routing capacity and request queues
@@ -115,6 +115,79 @@ swapper cleanly making room. Set it to the number of models that genuinely fit
 in VRAM at once, and see
 `guides/model-runtime/troubleshooting-model-wont-load` when a load starts
 failing after you raise it.
+
+## Make eviction cheap instead of avoiding it
+
+`recentPoolSize` avoids evictions by keeping models in VRAM. `sleepMode` makes
+the evictions you cannot avoid cheap:
+
+```yaml
+models:
+  qwen-27b:
+    env: ["VLLM_SERVER_DEV_MODE=1"]
+    cmd: vllm serve /models/qwen-27b-fp8 --port ${PORT} --enable-sleep-mode
+    sleepMode: true
+```
+
+A model evicted to make room for another is asked to release its GPU memory and
+stay alive, instead of being killed. The next request **wakes** it — the weights
+are copied back from host RAM — rather than paying for a full start.
+
+That matters because loading weights is the small half of a cold start. A vLLM
+start is process spawn, weight load, `torch.compile`, CUDA graph capture and
+warmup; waking skips all of it but the copy, because the process never died.
+
+**This requires vLLM's sleep mode, which is not on by default.** Both parts are
+needed: `VLLM_SERVER_DEV_MODE=1` in `env` (the endpoints are not mounted
+without it) and `--enable-sleep-mode` on the command. Miss either and `/sleep`
+answers 404; llama-swap logs that and stops the model instead, so the model
+keeps working and only the speedup is lost.
+
+### What it costs
+
+Host RAM, for as long as the model sleeps — roughly the model's weight size.
+Two sleeping 30 GB models are 60 GB of system memory. Budget for it.
+
+### What still stops a model outright
+
+Sleeping is what *eviction* means for the model, and nothing else:
+
+- an explicit unload (the dashboard's unload button, `/unload`) stops it
+- a `ttl` expiry stops it
+
+`ttl` is therefore how you bound the RAM: sleeping keeps swaps fast while a
+model is in rotation, and `ttl` reclaims it once nobody has asked for it in a
+while.
+
+The three settings stack into a memory hierarchy — `recentPoolSize` holds the
+hottest models in VRAM, `sleepMode` catches the ones pushed out of the pool, and
+`ttl` eventually gives the RAM back:
+
+```yaml
+models:
+  a: { sleepMode: true, ttl: 3600, env: ["VLLM_SERVER_DEV_MODE=1"], cmd: "..." }
+  b: { sleepMode: true, ttl: 3600, env: ["VLLM_SERVER_DEV_MODE=1"], cmd: "..." }
+
+routing:
+  scheduler:
+    use: fifo
+    settings:
+      fifo:
+        recentPoolSize: 1
+```
+
+A sleeping model shows as `sleeping` on the Models page and in `/running`, and
+the GPUs page stops counting it against its device — it is holding no VRAM, so
+a card whose only model is asleep reads as idle.
+
+Two interactions worth knowing:
+
+- **A sleeping model is never evicted again.** It is already holding no GPU
+  memory, so the scheduler does not consider it when deciding what to unload,
+  and it keeps sleeping while other models come and go.
+- **`manualOnly` still refuses to auto-load a sleeping model.** The model is not
+  loaded, so an inference request gets the usual 503; start it from the
+  dashboard as you would any manual model.
 
 ## Refuse loads the GPU has no room for
 

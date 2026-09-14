@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,12 @@ const cmdWaitDelay = 10 * time.Second
 // bounds the rare case where a process is still alive when its context is cut.
 const parentCancelGraceTimeout = time.Second
 
+// defaultSleepTimeout bounds a sleep or wake call to the upstream when the
+// caller passes no timeout. Both are dominated by a host<->GPU copy of the
+// model's weights, so this is sized for a large model on a slow link rather
+// than for the couple of seconds a healthy wake actually takes.
+const defaultSleepTimeout = 2 * time.Minute
+
 // startReq asks the run loop to bring the process up. Run and EnsureReady share
 // this one request type — and therefore one code path — so there is only ever a
 // single way to start a process. block selects the caller's semantics: Run parks
@@ -96,6 +103,11 @@ type startReq struct {
 }
 
 type stopReq struct {
+	timeout time.Duration
+	respond chan error
+}
+
+type sleepReq struct {
 	timeout time.Duration
 	respond chan error
 }
@@ -127,6 +139,7 @@ type ProcessCommand struct {
 
 	startCh     chan startReq
 	stopCh      chan stopReq
+	sleepCh     chan sleepReq
 	waitReadyCh chan waitReadyReq
 
 	// current ProcessState. Written only by run(); read by State() via atomic load.
@@ -146,7 +159,10 @@ type ProcessCommand struct {
 	loadGpu atomic.Value
 }
 
-var _ Process = (*ProcessCommand)(nil)
+var (
+	_ Process          = (*ProcessCommand)(nil)
+	_ ProcessWithSleep = (*ProcessCommand)(nil)
+)
 
 func New(
 	parentCtx context.Context,
@@ -164,6 +180,7 @@ func New(
 
 		startCh:     make(chan startReq),
 		stopCh:      make(chan stopReq),
+		sleepCh:     make(chan sleepReq),
 		waitReadyCh: make(chan waitReadyReq),
 		waitDelay:   cmdWaitDelay,
 	}
@@ -205,6 +222,14 @@ func (p *ProcessCommand) run() {
 		cmdDone      <-chan struct{}
 		cmdCancel    context.CancelFunc
 		readyWaiters []waitReadyReq
+		// liveHandler is the reverse-proxy handler belonging to the currently
+		// running process, held here so sleep can take it out of p.handler and
+		// wake can put it back. ServeHTTP must 503 rather than forward to an
+		// upstream that has released its weights, but the process (and so the
+		// proxy target) survives sleeping, so the handler is restored verbatim
+		// on wake instead of being rebuilt. Cleared whenever the process goes
+		// away.
+		liveHandler http.HandlerFunc
 		// runResp parks the in-flight Run caller's response channel. The
 		// interface contract is that Run blocks until the process is
 		// terminated, so we hold this until Stop, parentCtx, or an
@@ -267,6 +292,7 @@ func (p *ProcessCommand) run() {
 			cmd = nil
 			cmdDone = nil
 			cmdCancel = nil
+			liveHandler = nil
 			p.handler.Store(nil)
 			setState(StateStopped)
 			p.proxyLogger.Warnf("<%s> upstream process exited unexpectedly", p.id)
@@ -311,6 +337,33 @@ func (p *ProcessCommand) run() {
 				case StateShutdown:
 					req.respond <- fmt.Errorf("[%s] shutdown", p.id)
 					continue
+				case StateSleeping:
+					// Wake instead of start: the process is alive, so this is
+					// a weights-back-to-GPU copy, not a cold start. Handled
+					// inline (like killProcess) rather than in a goroutine —
+					// the upstream call is bounded by req.timeout, so the run
+					// loop can only be parked here for that long.
+					//
+					// Run (req.block) never takes this path: a caller asking to
+					// own the process lifecycle falls through to the rejection
+					// below, because the process it wants to run is already
+					// running.
+					if err := p.wakeUpstream(req.timeout); err != nil {
+						// The upstream would not wake. It is still sleeping as
+						// far as we know, and it is certainly not serving, so
+						// report the failure rather than claiming readiness.
+						p.proxyLogger.Errorf("<%s> wake from sleep failed: %v", p.id, err)
+						notifyWaiters(err)
+						req.respond <- err
+						continue
+					}
+					fn := liveHandler
+					p.handler.Store(&fn)
+					setState(StateReady)
+					p.proxyLogger.Infof("<%s> woke from sleep", p.id)
+					notifyWaiters(nil)
+					req.respond <- nil
+					continue
 				}
 			}
 			// Only valid from StateStopped. For Run this is also the "second
@@ -341,6 +394,7 @@ func (p *ProcessCommand) run() {
 					cmdDone = res.cmdDone
 					cmdCancel = res.cancel
 					fn := res.handlerFn
+					liveHandler = fn
 					p.handler.Store(&fn)
 					p.loadGpu.Store(p.effectiveGPU(req.opts))
 					setState(StateReady)
@@ -356,14 +410,22 @@ func (p *ProcessCommand) run() {
 					}
 
 					// Start TTL goroutine if configured — self-terminates
-					// when state leaves StateReady.
+					// once the process is neither serving nor sleeping.
+					//
+					// Sleeping deliberately does NOT end the TTL: a sleeping
+					// model still holds its weights in host RAM, and TTL is the
+					// knob that says "idle this long means give the resources
+					// back". So sleep bounds the swap cost and TTL bounds how
+					// long RAM stays held — the model is stopped outright when
+					// it expires. Surviving sleep also means a wake does not
+					// need to start a second goroutine.
 					if p.config.UnloadAfter > 0 {
 						ttlDuration := time.Duration(p.config.UnloadAfter) * time.Second
 						go func() {
 							ticker := time.NewTicker(time.Second)
 							defer ticker.Stop()
 							for range ticker.C {
-								if p.State() != StateReady {
+								if st := p.State(); st != StateReady && st != StateSleeping {
 									return
 								}
 								if p.inflight.Load() != 0 {
@@ -426,6 +488,43 @@ func (p *ProcessCommand) run() {
 				pendingStop.respond <- nil
 			}
 
+		// Sleep: ask the upstream to release its GPU memory without exiting.
+		// Only valid while serving — there is nothing to release otherwise,
+		// and a caller that wants the memory freed regardless should fall back
+		// to Stop (see ProcessWithSleep.Sleep).
+		case req := <-p.sleepCh:
+			// Already sleeping is a no-op, not an error — the same idempotence
+			// Stop has. It matters because the router evicts from a snapshot:
+			// a model can be nominated for eviction again while it is already
+			// asleep, and answering with an error there would send the caller
+			// down its "sleep failed, stop it instead" fallback and kill a
+			// model that is already holding no GPU memory at all.
+			if state == StateSleeping {
+				req.respond <- nil
+				continue
+			}
+			if state != StateReady {
+				req.respond <- fmt.Errorf("[%s] cannot sleep in %s state", p.id, state)
+				continue
+			}
+			// Stop forwarding first: between here and the upstream actually
+			// releasing its weights, a request that slipped through would hit a
+			// model mid-teardown. Cleared before the call, restored only if the
+			// call fails, so there is no window where p.handler points at an
+			// upstream that has already let go of its GPU memory.
+			p.handler.Store(nil)
+			if err := p.sleepUpstream(req.timeout); err != nil {
+				// Still serving: put the handler back so a failed sleep is a
+				// no-op rather than a model that quietly stopped answering.
+				fn := liveHandler
+				p.handler.Store(&fn)
+				req.respond <- err
+				continue
+			}
+			setState(StateSleeping)
+			p.proxyLogger.Infof("<%s> sleeping — GPU memory released, process kept alive", p.id)
+			req.respond <- nil
+
 		// Stop: tear down a running process.
 		case stop := <-p.stopCh:
 			toreDown := cmd != nil
@@ -435,6 +534,7 @@ func (p *ProcessCommand) run() {
 				cmd = nil
 				cmdDone = nil
 				cmdCancel = nil
+				liveHandler = nil
 				p.handler.Store(nil)
 			}
 			// Stop is a no-op (and not an error) when already Stopped — this
@@ -869,6 +969,73 @@ func (p *ProcessCommand) Stop(timeout time.Duration) error {
 		return fmt.Errorf("[%s] shutdown", p.id)
 	}
 	return <-req.respond
+}
+
+// Sleep implements ProcessWithSleep.
+func (p *ProcessCommand) Sleep(timeout time.Duration) error {
+	req := sleepReq{
+		timeout: timeout,
+		respond: make(chan error, 1),
+	}
+	select {
+	case p.sleepCh <- req:
+	case <-p.parentCtx.Done():
+		return fmt.Errorf("[%s] shutdown", p.id)
+	}
+	return <-req.respond
+}
+
+// sleepUpstream and wakeUpstream drive vLLM's sleep-mode endpoints, which are
+// only mounted when the server runs with VLLM_SERVER_DEV_MODE=1 and
+// --enable-sleep-mode. Level 1 is the only level worth asking for here: it
+// moves the weights to host RAM and drops the KV cache, which is what makes
+// the wake a copy instead of a reload. Level 2 discards the weights too, and
+// then waking costs the same as starting — at which point stopping the
+// process is simpler and frees the RAM as well.
+//
+// Both run on the run loop, so both are bounded by the caller's timeout.
+func (p *ProcessCommand) sleepUpstream(timeout time.Duration) error {
+	return p.upstreamPost("/sleep?level=1", timeout)
+}
+
+func (p *ProcessCommand) wakeUpstream(timeout time.Duration) error {
+	return p.upstreamPost("/wake_up", timeout)
+}
+
+// upstreamPost posts to a path on the upstream's own listener. It deliberately
+// does not go through the reverse proxy: these are administrative calls about
+// the process, not traffic for it, and during sleep the proxy handler is
+// unset precisely so that model traffic cannot get through.
+func (p *ProcessCommand) upstreamPost(path string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = defaultSleepTimeout
+	}
+	endpoint := strings.TrimSuffix(p.config.Proxy, "/") + path
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("[%s] building %s request: %w", p.id, path, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("[%s] %s failed: %w", p.id, path, err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		// A 404 is the tell that the upstream is not a sleep-capable vLLM, or
+		// was started without VLLM_SERVER_DEV_MODE=1 and --enable-sleep-mode.
+		// Worth naming, because the config looks fine and the model works.
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("[%s] %s returned 404: the upstream has no sleep-mode endpoints. vLLM only mounts them with VLLM_SERVER_DEV_MODE=1 in env and --enable-sleep-mode on the command", p.id, path)
+		}
+		return fmt.Errorf("[%s] %s returned %d", p.id, path, resp.StatusCode)
+	}
+	return nil
 }
 
 func (p *ProcessCommand) State() ProcessState {

@@ -420,6 +420,36 @@ func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
 	return b.grant(req, scheduler.HandlerResp{HandleFunc: b.trackedServe(modelID, p)})
 }
 
+// evict frees the GPU memory a model holds so another can load, and is the
+// one place that decides how. A model configured with sleepMode is asked to
+// sleep — the process stays alive with its weights in host RAM, so the next
+// request wakes it instead of paying for a full start. Everything else is
+// stopped.
+//
+// This is deliberately NOT used by StopProcesses: that path serves an explicit
+// unload, where the caller asked for the model to be gone and a process still
+// sitting on gigabytes of host RAM would not be that. Eviction to make room is
+// the only case where sleeping is the right reading of the request.
+//
+// A sleep that fails falls back to stopping. The swap that triggered this is
+// about to load another model onto the same device, so leaving the old one
+// holding its VRAM because sleeping did not work would turn a slow swap into a
+// failed one.
+func (b *baseRouter) evict(id string, p process.Process, timeout time.Duration) {
+	if b.configAt().Models[id].SleepMode {
+		if sleeper, ok := p.(process.ProcessWithSleep); ok {
+			if err := sleeper.Sleep(timeout); err == nil {
+				return
+			} else {
+				b.logger.Warnf("%s: sleeping %s failed (%v); stopping it instead", b.name, id, err)
+			}
+		}
+	}
+	if err := p.Stop(timeout); err != nil {
+		b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
+	}
+}
+
 // StopProcesses implements scheduler.Effects, stopping the named processes in
 // parallel and blocking until all have stopped.
 func (b *baseRouter) StopProcesses(timeout time.Duration, ids []string) {
@@ -470,9 +500,7 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		wg.Add(1)
 		go func(p process.Process, id string) {
 			defer wg.Done()
-			if err := p.Stop(timeout); err != nil {
-				b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
-			}
+			b.evict(id, p, timeout)
 		}(b.processesAt()[mID], mID)
 	}
 	wg.Wait()

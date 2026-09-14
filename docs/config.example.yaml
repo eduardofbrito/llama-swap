@@ -471,6 +471,29 @@ models:
     # - useful for a large model that must only run when someone asks for it
     manualOnly: false
 
+    # sleepMode: when evicted, sleep instead of stopping
+    # - optional, default: false
+    # - a model evicted to make room for another is asked to release its GPU
+    #   memory and stay alive, so the next request WAKES it (weights copied
+    #   back from host RAM) instead of paying for a full start: process spawn,
+    #   weight load, torch.compile, CUDA graph capture and warmup. On a large
+    #   model that is the difference between minutes and seconds
+    # - REQUIRES a vLLM upstream started with sleep mode available:
+    #     env: ["VLLM_SERVER_DEV_MODE=1"]
+    #     cmd: vllm serve ... --enable-sleep-mode
+    #   without both, /sleep answers 404 and llama-swap logs the failure and
+    #   stops the model instead — correct, just not faster
+    # - COSTS host RAM: a sleeping model holds roughly its weight size in
+    #   system memory until it wakes. Two sleeping 30 GB models are 60 GB of
+    #   host RAM
+    # - only eviction sleeps. An explicit unload (the dashboard's unload
+    #   button, /unload) and a ttl expiry still stop the process outright, so
+    #   ttl is how you bound how long that RAM stays held
+    # - pairs with routing.scheduler.settings.fifo.recentPoolSize: the pool
+    #   keeps the hottest models in VRAM, sleepMode catches the ones pushed
+    #   out of it, and ttl eventually reclaims the RAM
+    sleepMode: false
+
     # sendLoadingState: overrides the global sendLoadingState setting for this model
     # - optional, default: undefined (use global setting)
     sendLoadingState: false

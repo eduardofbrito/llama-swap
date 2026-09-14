@@ -18,6 +18,12 @@ const (
 
 	// process is shutdown and will not be restarted
 	StateShutdown ProcessState = ProcessState("shutdown")
+
+	// StateSleeping means the upstream process is alive but has released its
+	// GPU memory: llama-swap asked it to sleep instead of killing it, so the
+	// next load is a wake-up (weights copied back from host RAM) rather than a
+	// cold start. See ProcessWithSleep.
+	StateSleeping ProcessState = ProcessState("sleeping")
 )
 
 // Options carries optional, per-load parameters for the methods in the
@@ -66,6 +72,7 @@ type Process interface {
 	//	ready    -> returns nil immediately
 	//	stopped  -> starts the process and waits for it to become ready
 	//	stopping -> waits for the stop to finish, then starts
+	//	sleeping -> wakes the process and waits for it to serve again
 	//	shutdown -> returns an error
 	EnsureReady(ctx context.Context, timeout time.Duration) error
 
@@ -103,4 +110,36 @@ type ProcessWithOptions interface {
 	// the start. Options are only consulted when this call actually starts the
 	// process; they are ignored when it merely observes an existing state.
 	EnsureReadyWithOptions(ctx context.Context, timeout time.Duration, opts Options) error
+}
+
+// ProcessWithSleep is implemented by processes whose upstream can release its
+// GPU memory without exiting — vLLM's sleep mode (`--enable-sleep-mode` plus
+// VLLM_SERVER_DEV_MODE=1) is the case this was written for.
+//
+// The point is swap latency. Killing a model and starting it again pays for
+// process spawn, weight load, torch.compile, CUDA graph capture and warmup;
+// on a large model that is minutes. Sleeping keeps the process — and all of
+// that warm state — alive and only moves the weights to host RAM, so waking is
+// a PCIe copy measured in seconds.
+//
+// The trade is host RAM: a sleeping model holds roughly its weight size in
+// system memory for as long as it sleeps. That is why sleeping is an eviction
+// strategy and not a replacement for stopping: an explicit unload and a TTL
+// expiry still terminate the process outright.
+//
+// There is no Wake method by design. Waking is what EnsureReady already means
+// ("bring the process to a state where it serves"), so every existing caller
+// gets it without knowing sleep exists.
+type ProcessWithSleep interface {
+	Process
+
+	// Sleep asks the upstream to release its GPU memory while staying alive,
+	// moving the process to StateSleeping. The timeout bounds the request to
+	// the upstream.
+	//
+	// It is only valid from StateReady; from any other state it returns an
+	// error and changes nothing. Callers that need the memory freed no matter
+	// what should fall back to Stop when Sleep fails — a process that failed to
+	// sleep is still holding its VRAM.
+	Sleep(timeout time.Duration) error
 }

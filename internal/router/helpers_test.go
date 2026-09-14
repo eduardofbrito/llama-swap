@@ -72,9 +72,14 @@ type fakeProcess struct {
 
 	runCalls     atomic.Int32
 	stopCalls    atomic.Int32
+	sleepCalls   atomic.Int32
 	serveCalls   atomic.Int32
 	optsCalls    atomic.Int32
 	stopTimeouts []time.Duration
+
+	// sleepErr, when non-nil, makes Sleep fail with it, driving the router's
+	// "sleep failed, stop it instead" fallback.
+	sleepErr error
 
 	// lastOptsVal records the most recent Options passed to a WithOptions
 	// call; guarded by mu.
@@ -206,6 +211,29 @@ func (f *fakeProcess) Stop(timeout time.Duration) error {
 	default:
 		close(f.stopCh)
 	}
+	return nil
+}
+
+// Sleep mirrors ProcessCommand's: valid only while ready, a no-op when
+// already sleeping, and it keeps the process alive either way.
+func (f *fakeProcess) Sleep(timeout time.Duration) error {
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+
+	f.sleepCalls.Add(1)
+	if f.sleepErr != nil {
+		return f.sleepErr
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state == process.StateSleeping {
+		return nil
+	}
+	if f.state != process.StateReady {
+		return fmt.Errorf("[%s] cannot sleep in %s state", f.id, f.state)
+	}
+	f.setStateLocked(process.StateSleeping)
 	return nil
 }
 

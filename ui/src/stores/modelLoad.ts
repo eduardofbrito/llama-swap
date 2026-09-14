@@ -52,5 +52,9 @@ export function statusDotColor(m: Model | undefined): string {
   if (!m) return "bg-muted-foreground/40";
   if (m.state === "ready") return "bg-success";
   if (m.state === "starting" || m.state === "stopping") return "bg-warning";
+  // Sleeping sits between ready and stopped: the process is alive and will
+  // wake in seconds, but it is holding no GPU memory and cannot serve yet.
+  // A dimmed success colour reads as "almost ready" rather than "off".
+  if (m.state === "sleeping") return "bg-success/40";
   return "bg-muted-foreground/40";
 }

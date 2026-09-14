@@ -24,6 +24,12 @@ Features added in this fork on top of upstream `main`:
   - A manual model that **is** loaded still serves normally, and it can be started on purpose: the dashboard's load buttons (a GET against the model endpoint) are honored
   - The Models list shows a `manual` badge on such models; combine with a `persistent` group to keep it resident
   - See [routing capacity and request queues](docs/kb/guides/routing/capacity-and-queues.md) for the full behaviour and failure modes
+- ✅ **Sleep mode** (`sleepMode: true` per model) - evicting a model puts it to sleep instead of killing it
+  - The process stays alive with its weights in host RAM and releases its GPU memory, so the next request **wakes** it instead of paying for a full start (spawn, weight load, `torch.compile`, CUDA graph capture, warmup) — minutes become seconds on a large model
+  - Requires a vLLM upstream with sleep mode available: `VLLM_SERVER_DEV_MODE=1` in `env` **and** `--enable-sleep-mode` on the `cmd`. Without both, `/sleep` answers 404 and llama-swap falls back to stopping the model, so nothing breaks — only the speedup is lost
+  - Costs roughly the model's weight size in host RAM while it sleeps. Only eviction sleeps: an explicit unload and a `ttl` expiry still stop the process, so `ttl` bounds how long that RAM is held
+  - Stacks with `recentPoolSize` into a hierarchy — VRAM for the hottest models, host RAM for the ones pushed out of the pool, stopped after `ttl`
+  - A sleeping model shows as `sleeping` on the Models page and stops counting against its GPU on the GPUs page
 - ✅ **GPUs page** (`/gpus` menu item, right below Models)
   - Lists every GPU the host exposes with the model(s) currently loaded on each
   - Shows each device's live used/total memory, refreshed while the page is open

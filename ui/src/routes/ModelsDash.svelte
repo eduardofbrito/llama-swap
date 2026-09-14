@@ -97,6 +97,14 @@
     {#if model.manualOnly}
       <Tag class="px-1.5 text-[0.625rem] uppercase">manual</Tag>
     {/if}
+    {#if model.state === "sleeping"}
+      <Tag
+        class="px-1.5 text-[0.625rem] uppercase"
+        title="Evicted to sleep: the process is alive with its weights in host RAM and no GPU memory held. The next request wakes it in seconds instead of reloading it."
+      >
+        sleeping
+      </Tag>
+    {/if}
     {#if !model.peerID}
       <GpuSelector {model} />
       <a

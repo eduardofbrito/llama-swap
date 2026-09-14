@@ -88,6 +88,15 @@
 
   type GpuStatus = "idle" | "in-use" | "external" | "unknown";
 
+  // Models on this GPU that are actually holding its memory. A sleeping model
+  // is still listed on the card — it will wake back onto this device — but it
+  // released its VRAM, so it must not make the GPU read as "In use". Counting
+  // it would also hide the case this page exists for: memory held by a process
+  // llama-swap did not start.
+  function residentOn(gpu: GpuInfo): Model[] {
+    return loadedOn(gpu).filter((model) => model.state !== "sleeping");
+  }
+
   // What the badge says about a GPU. "external" is the case worth surfacing:
   // memory is occupied but llama-swap did not put it there.
   function gpuStatus(gpu: GpuInfo, loadedCount: number): GpuStatus {
@@ -123,10 +132,12 @@
     return status === "external" ? "bg-warning" : "bg-success";
   }
 
-  type DotColor = "grey" | "yellow" | "green";
+  type DotColor = "grey" | "yellow" | "green" | "dim-green";
   function statusDotColor(model: Model): DotColor {
     if (model.state === "ready") return "green";
     if (model.state === "starting" || model.state === "stopping") return "yellow";
+    // Alive and seconds from serving, but holding nothing on the device.
+    if (model.state === "sleeping") return "dim-green";
     return "grey";
   }
 
@@ -134,6 +145,7 @@
     grey: "bg-muted-foreground/40",
     yellow: "bg-warning",
     green: "bg-success",
+    "dim-green": "bg-success/40",
   };
 </script>
 
@@ -157,7 +169,7 @@
       {#each $gpus as gpu (gpu.index)}
         {@const loaded = loadedOn(gpu)}
         {@const available = availableFor(gpu)}
-        {@const status = gpuStatus(gpu, loaded.length)}
+        {@const status = gpuStatus(gpu, residentOn(gpu).length)}
         {@const memory = formatGpuMemory(gpu.usedMB, gpu.totalMB)}
         {@const pct = gpuMemoryPct(gpu.usedMB, gpu.totalMB)}
         <article
@@ -210,7 +222,14 @@
                     <span class={`size-2 shrink-0 rounded-full ${dotClass[statusDotColor(model)]}`}></span>
                     <span class="truncate font-medium">{model.id}</span>
                   </a>
-                  <span class="shrink-0 text-xs text-muted-foreground">{model.state}</span>
+                  <span
+                    class="shrink-0 text-xs text-muted-foreground"
+                    title={model.state === "sleeping"
+                      ? "Sleeping: the process is alive with its weights in host RAM and holds no memory on this GPU. The next request wakes it here in seconds."
+                      : undefined}
+                  >
+                    {model.state}
+                  </span>
                   <Button
                     size="sm"
                     variant="outline"

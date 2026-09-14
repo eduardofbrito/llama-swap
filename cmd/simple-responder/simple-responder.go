@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,7 +29,13 @@ func main() {
 
 	ignoreSigTerm := flag.Bool("ignore-sig-term", false, "ignore SIGTERM signal")
 
+	noSleepMode := flag.Bool("no-sleep-mode", false, "do not serve the vLLM sleep-mode endpoints, so /sleep answers 404")
+
 	flag.Parse() // Parse the command-line flags
+
+	// Tracks whether /sleep was called, so /is_sleeping can answer like vLLM's
+	// does. Atomic because gin serves each request on its own goroutine.
+	var sleeping atomic.Bool
 
 	// Create a new Gin router
 	r := gin.New()
@@ -268,6 +275,25 @@ func main() {
 		c.Header("Content-Type", "application/json")
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+
+	// vLLM sleep-mode endpoints, so the sleepMode tests can exercise the real
+	// request/response shape against a real process. -no-sleep-mode makes them
+	// 404 instead, which is what a vLLM started without --enable-sleep-mode
+	// (or without VLLM_SERVER_DEV_MODE=1) does — the case llama-swap has to
+	// fall back to stopping the model on.
+	if !*noSleepMode {
+		r.POST("/sleep", func(c *gin.Context) {
+			sleeping.Store(true)
+			c.JSON(200, gin.H{"level": c.DefaultQuery("level", "1")})
+		})
+		r.POST("/wake_up", func(c *gin.Context) {
+			sleeping.Store(false)
+			c.JSON(200, gin.H{"status": "awake"})
+		})
+		r.GET("/is_sleeping", func(c *gin.Context) {
+			c.JSON(200, gin.H{"is_sleeping": sleeping.Load()})
+		})
+	}
 
 	r.GET("/", func(c *gin.Context) {
 		c.Header("Content-Type", "text/plain")

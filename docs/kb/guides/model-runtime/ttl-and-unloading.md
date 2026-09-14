@@ -92,7 +92,11 @@ endpoint.
   second range is a reasonable start.
 - **Slow-loading models** (large weights, vLLM). A short TTL is expensive — you
   pay a long cold start on the next request. Give them a long TTL or `ttl: 0`
-  and let the router evict them only when it must.
+  and let the router evict them only when it must. On vLLM specifically,
+  `models.*.sleepMode` makes that eviction cheap instead: the model releases its
+  GPU memory without exiting, so the next request wakes it in seconds. TTL then
+  becomes the bound on how long it may hold host RAM while asleep — see
+  `guides/routing/capacity-and-queues`.
 - **Keeping a small model always warm.** `ttl: 0` plus a `persistent` group.
 
 ## Related

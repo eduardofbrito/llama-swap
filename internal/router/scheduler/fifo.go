@@ -668,7 +668,16 @@ func (s *FIFO) runningSet(excludeActive string) []string {
 		seen[id] = struct{}{}
 		out = append(out, id)
 	}
-	for id := range s.effects.RunningModels() {
+	for id, state := range s.effects.RunningModels() {
+		// A sleeping model has already released its GPU memory; it is alive
+		// only to make its next load fast. Handing it to the planner would
+		// have it nominated for eviction to free capacity it is not using —
+		// and the eviction of an already-sleeping model can only end in it
+		// being stopped, which is exactly the cold start sleeping exists to
+		// avoid. Capacity-wise it is not running, so it is not listed here.
+		if state == process.StateSleeping {
+			continue
+		}
 		add(id)
 	}
 	for _, id := range activeTargets(s.active, excludeActive) {
