@@ -348,11 +348,19 @@ func (p *ProcessCommand) run() {
 					// own the process lifecycle falls through to the rejection
 					// below, because the process it wants to run is already
 					// running.
+					// Timed, and the start is announced before the call: a wake
+					// is a multi-gigabyte copy back onto the GPU, so it is slow
+					// enough to be worth measuring and slow enough that an
+					// operator watching the log needs to see it began. Without
+					// this, a swap that took minutes gives no way to tell the
+					// wake apart from the evictions that preceded it.
+					p.proxyLogger.Infof("<%s> waking from sleep", p.id)
+					wakeStart := time.Now()
 					if err := p.wakeUpstream(req.timeout); err != nil {
 						// The upstream would not wake. It is still sleeping as
 						// far as we know, and it is certainly not serving, so
 						// report the failure rather than claiming readiness.
-						p.proxyLogger.Errorf("<%s> wake from sleep failed: %v", p.id, err)
+						p.proxyLogger.Errorf("<%s> wake from sleep failed after %s: %v", p.id, time.Since(wakeStart).Round(time.Millisecond), err)
 						notifyWaiters(err)
 						req.respond <- err
 						continue
@@ -360,7 +368,7 @@ func (p *ProcessCommand) run() {
 					fn := liveHandler
 					p.handler.Store(&fn)
 					setState(StateReady)
-					p.proxyLogger.Infof("<%s> woke from sleep", p.id)
+					p.proxyLogger.Infof("<%s> woke from sleep in %s", p.id, time.Since(wakeStart).Round(time.Millisecond))
 					notifyWaiters(nil)
 					req.respond <- nil
 					continue
@@ -513,6 +521,11 @@ func (p *ProcessCommand) run() {
 			// call fails, so there is no window where p.handler points at an
 			// upstream that has already let go of its GPU memory.
 			p.handler.Store(nil)
+			// Timed for the same reason the wake is: this is a multi-gigabyte
+			// copy off the GPU, and it runs before the target model can start.
+			// A swap that felt slow is either this or the wake, and the two
+			// durations are what tell them apart.
+			sleepStart := time.Now()
 			if err := p.sleepUpstream(req.timeout); err != nil {
 				// Still serving: put the handler back so a failed sleep is a
 				// no-op rather than a model that quietly stopped answering.
@@ -522,7 +535,7 @@ func (p *ProcessCommand) run() {
 				continue
 			}
 			setState(StateSleeping)
-			p.proxyLogger.Infof("<%s> sleeping — GPU memory released, process kept alive", p.id)
+			p.proxyLogger.Infof("<%s> slept in %s — GPU memory released, process kept alive", p.id, time.Since(sleepStart).Round(time.Millisecond))
 			req.respond <- nil
 
 		// Stop: tear down a running process.

@@ -50,12 +50,13 @@ export function onToggleLoad(m: Model): void {
 
 export function statusDotColor(m: Model | undefined): string {
   if (!m) return "bg-muted-foreground/40";
-  if (m.state === "ready") return "bg-success";
-  // Sleeping shares the transitional colour with starting/stopping: like
-  // those, the model is neither serving nor gone, and the next request puts
-  // it back in service. What separates it from "ready" green is what matters
-  // at a glance — it cannot answer right now. The state label and the
-  // `sleeping` badge next to the dot say which of the three it is.
-  if (m.state === "starting" || m.state === "stopping" || m.state === "sleeping") return "bg-warning";
-  return "bg-muted-foreground/40";
+  // One colour per state, so the dot alone says which it is without reading
+  // the label beside it. The three in-between states are genuinely different
+  // things to an operator: one is coming up, one is going down, one is parked
+  // and will come back cheaply.
+  if (m.state === "ready") return "bg-success"; // green: serving
+  if (m.state === "sleeping") return "bg-warning"; // yellow: parked, wakes on demand
+  if (m.state === "starting") return "bg-primary"; // blue: coming up
+  if (m.state === "stopping") return "bg-destructive"; // red: going down
+  return "bg-muted-foreground/40"; // grey: stopped / shutdown / unknown
 }
