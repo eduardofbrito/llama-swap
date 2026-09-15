@@ -180,7 +180,31 @@ A sleeping model shows as `sleeping` on the Models page and in `/running`, and
 the GPUs page stops counting it against its device — it is holding no VRAM, so
 a card whose only model is asleep reads as idle.
 
-Two interactions worth knowing:
+### It does not free the whole card, and it does not move
+
+Two limits to plan around, both consequences of the process staying alive:
+
+- **A sleeping model still holds a few GB on its GPU** — the CUDA context and
+  whatever its runtime allocated outside the sleep-mode allocator. vLLM reports
+  it: `Sleep mode freed 65.37 GiB memory, 4.29 GiB memory is still in use`.
+  Budget 4–6 GB per sleeping model on that card, and subtract it from what the
+  resident model may claim. A model sized with `--gpu-memory-utilization 0.92`
+  will fail to start on a card where something is asleep, because vLLM computes
+  that fraction against the card's **total**, not what is free.
+- **A sleeping model cannot change GPU.** A live CUDA process is bound to the
+  device it started on, so waking copies the weights back onto that same card.
+  Group `gpus` placement and an explicit `llama-swap-gpu` override are both
+  ignored on a wake (the override logs a warning), because honouring either
+  would mean restarting the process — the cold start sleeping exists to avoid.
+  Placement is decided once, on the load that starts the process.
+
+So `gpus` and `sleepMode` combine, but not into "wake onto whichever card is
+free". What you get is rotation *within* each card: the group spreads models
+across devices at cold-start time, and sleeping makes re-activation cheap on
+the card each model was given. Size the group accordingly — one or two sleepers
+per card, not five.
+
+Two further interactions worth knowing:
 
 - **A sleeping model is never evicted again.** It is already holding no GPU
   memory, so the scheduler does not consider it when deciding what to unload,

@@ -380,7 +380,23 @@ func (b *baseRouter) StartSwap(modelID string, evict []string, opts process.Opti
 // An explicit override always wins. Someone who picked a GPU in the UI, or put
 // llama-swap-gpu on a request, asked for that device; silently overriding it
 // with the group's choice would make the control a lie.
+//
+// A sleeping model is the one case where nothing can be placed at all. It is
+// waiting on a live process, and a live CUDA process is bound to the device it
+// started on: waking copies the weights back onto that card and nowhere else.
+// Placement only means something for a load that starts a process.
 func (b *baseRouter) placeOnDevice(modelID string, evict []string, requested string) string {
+	if current, sleeping := b.sleepingOn(modelID); sleeping {
+		if requested != "" && requested != current {
+			// Worth a warning rather than a silent no-op: the operator picked a
+			// GPU and is going to get a different one. Honouring it would mean
+			// stopping the process and paying the cold start that sleeping
+			// exists to avoid, so the choice is deliberately not made here.
+			b.logger.Warnf("%s: %s is asleep on device %s and cannot move to %s without a restart; waking it where it is",
+				b.name, modelID, current, requested)
+		}
+		return current
+	}
 	if requested != "" {
 		if b.devices.manages(modelID) {
 			b.logger.Debugf("%s: %s pinned to %s by the request; its group's placement is skipped",
@@ -401,6 +417,18 @@ func (b *baseRouter) placeOnDevice(modelID string, evict []string, requested str
 	}
 	b.logger.Debugf("%s: placing %s on device %s", b.name, modelID, device)
 	return device
+}
+
+// sleepingOn reports the device a sleeping model is parked on. The state read
+// races the process's run loop, which is why the answer is only ever used to
+// decline to move the model: acting on a stale "sleeping" costs a placement
+// that the start path would have made anyway, never a wrong device.
+func (b *baseRouter) sleepingOn(modelID string) (device string, sleeping bool) {
+	p, ok := b.processesAt()[modelID]
+	if !ok || p.State() != process.StateSleeping {
+		return "", false
+	}
+	return b.ProcessGPU(modelID), true
 }
 
 // GrantError implements scheduler.Effects.

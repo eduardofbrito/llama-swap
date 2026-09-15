@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mostlygeek/llama-swap/internal/config"
 	"github.com/mostlygeek/llama-swap/internal/process"
@@ -211,5 +212,71 @@ func TestBaseRouter_NoDeviceGroupLeavesOptionsAlone(t *testing.T) {
 	}
 	if got := a.lastOpts().GpuEnvVar; got != "" {
 		t.Errorf("GpuEnvVar = %q, want empty for a model no group places", got)
+	}
+}
+
+// TestBaseRouter_SleepingModelIsNotRepositioned pins the hard limit of
+// combining group `gpus` with sleepMode: a sleeping model is waiting on a live
+// process, and a live CUDA process is bound to the device it started on.
+// Waking copies the weights back onto that card and nowhere else, so the
+// router must not hand the wake a different device — and must not record one
+// either, or the assigner's idea of where models sit drifts from reality.
+func TestBaseRouter_SleepingModelIsNotRepositioned(t *testing.T) {
+	a, bProc := newFakeProcess("a"), newFakeProcess("b")
+	a.autoReady, bProc.autoReady = true, true
+
+	conf := gpuGroupConfig([]string{"0", "1"}, []string{"a", "b"}, "")
+	r := newTestBaseWithConfig(t, conf,
+		map[string]process.Process{"a": a, "b": bProc}, &stubPlanner{})
+
+	serve(t, r, "a")
+	placed := a.lastOpts().GpuOverride
+	if placed == "" {
+		t.Fatal("a was never placed on a device")
+	}
+
+	// Park it, then ask for it again: the wake must target the same device.
+	if err := a.Sleep(time.Second); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+	serve(t, r, "a")
+
+	if got := a.lastOpts().GpuOverride; got != placed {
+		t.Errorf("GpuOverride = %q after waking, want %q; a sleeping model cannot change GPU", got, placed)
+	}
+}
+
+// TestBaseRouter_SleepingModelIgnoresAGpuOverride: the same limit applies to an
+// explicit per-request GPU, which normally wins over everything. Honouring it
+// would mean restarting the process — exactly the cold start sleeping avoids —
+// so the request is served where the model already is.
+func TestBaseRouter_SleepingModelIgnoresAGpuOverride(t *testing.T) {
+	a := newFakeProcess("a")
+	a.autoReady = true
+
+	conf := gpuGroupConfig([]string{"0", "1"}, []string{"a"}, "")
+	r := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
+
+	serve(t, r, "a")
+	placed := a.lastOpts().GpuOverride
+
+	if err := a.Sleep(time.Second); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+
+	req := newRequest("a")
+	req = req.WithContext(swaputil.SetContext(req.Context(), swaputil.ReqContextData{
+		Model: "a", ModelID: "a", GpuOverride: "7",
+	}))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+
+	if got := a.lastOpts().GpuOverride; got == "7" {
+		t.Error("the wake was handed device 7; a sleeping process cannot move to another GPU")
+	} else if got != placed {
+		t.Errorf("GpuOverride = %q, want %q (where it is asleep)", got, placed)
 	}
 }
