@@ -616,6 +616,11 @@ RUN set -eux; \
     esac; \
     grep -q "VLLM_PLE_CPU_OFFLOAD" /opt/vllm-flash-next/dist-packages/vllm/envs.py \
       || { echo "FALHA: VLLM_PLE_CPU_OFFLOAD nao existe nessa copia do vLLM — a imagem apontada em FLASH_NEXT_VLLM_IMAGE pode nao ser a de preview esperada" >&2; exit 1; }; \
+    if grep -q "VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET" /opt/vllm-flash-next/dist-packages/vllm/envs.py; then \
+      echo "OK: esta copia do vLLM tem o planner LIMITADO do fastsafetensors — o flash-next PODE usar --load-format fastsafetensors, desde que com VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET definido (ver o bloco dele no config.yaml)"; \
+    else \
+      echo "AVISO: esta copia do vLLM NAO tem VLLM_FASTSAFETENSORS_DEVICE_MEMORY_BUDGET. Sem ele o fastsafetensors faz staging de um SHARD INTEIRO em VRAM antes de distribuir, que e a causa conhecida do OOM no load dos pesos do flash-next. MANTENHA o --load-format fastsafetensors fora do cmd dele." >&2; \
+    fi; \
     echo "=== vllm-flash-next verificado (offload da PLE presente) ==="
 
 # NAO RESOLVIDO POR ESTE BUILD: mesmo com o binario isolado disponivel, o
