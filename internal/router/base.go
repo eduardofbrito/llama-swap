@@ -495,6 +495,8 @@ func (b *baseRouter) trackedServe(modelID string, p process.Process) http.Handle
 func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Options) {
 	timeout := b.healthCheckTimeout()
 
+	swapStart := time.Now()
+
 	var wg sync.WaitGroup
 	for _, mID := range toStop {
 		wg.Add(1)
@@ -504,6 +506,16 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		}(b.processesAt()[mID], mID)
 	}
 	wg.Wait()
+
+	// The evictions gate everything after them, so when a swap is slow this is
+	// the first place to look — and it used to be the only part with no
+	// timing at all. The processes time their own sleeps and wakes; what was
+	// missing was how long the target waited before its turn came.
+	evictedIn := time.Since(swapStart)
+	if len(toStop) > 0 {
+		b.logger.Infof("%s: evicted %v in %s, now loading %s",
+			b.name, toStop, evictedIn.Round(time.Millisecond), modelID)
+	}
 
 	// EnsureReady rather than a State() check followed by Run: the router must
 	// not assume anything about the process. Deciding out here means acting on
@@ -542,6 +554,15 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		// Quiet during shutdown: every in-flight swap fails at once there, and
 		// that is expected rather than worth a warning per model.
 		b.logger.Warnf("%s: starting %s failed: %v", b.name, modelID, err)
+	}
+	if err == nil {
+		// Split so a slow swap can be attributed without guessing: eviction
+		// time and load time are different problems with different fixes.
+		b.logger.Infof("%s: swapped to %s in %s (evictions %s, load %s)",
+			b.name, modelID,
+			time.Since(swapStart).Round(time.Millisecond),
+			evictedIn.Round(time.Millisecond),
+			time.Since(swapStart.Add(evictedIn)).Round(time.Millisecond))
 	}
 	if err == nil && coldStart {
 		// Only a successful cold start says anything about what the model needs.
