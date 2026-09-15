@@ -26,7 +26,7 @@
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
 #   # reprodutivel no commit atual do fork (main, checado em 2026-09-15):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=bb5c8a2c3bf4a03f5e5806bcc5a8d31787a0695d -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
@@ -164,10 +164,10 @@ ARG TORCH_INDEX_URL=
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea
+ARG LLAMA_SWAP_REF=bb5c8a2c3bf4a03f5e5806bcc5a8d31787a0695d
 
 RUN set -eux; \
-    apt-get update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends ca-certificates git; \
     rm -rf /var/lib/apt/lists/*; \
     git clone --filter=blob:none https://github.com/eduardofbrito/llama-swap.git /src/llama-swap; \
@@ -183,7 +183,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea
+ARG LLAMA_SWAP_REF=bb5c8a2c3bf4a03f5e5806bcc5a8d31787a0695d
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
@@ -378,7 +378,7 @@ RUN set -eux; \
     mkdir -p /out/ollama; \
     if [ "$WITH_OLLAMA" != "1" ]; then echo "WITH_OLLAMA=0 — pulando Ollama"; exit 0; fi; \
     rm -rf /var/lib/apt/lists/*; \
-    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends curl ca-certificates zstd tar; \
     rm -rf /var/lib/apt/lists/*; \
     curl -fsSL -o /tmp/ollama.tar.zst "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"; \
@@ -412,7 +412,7 @@ RUN set -eux; \
     mkdir -p /out/comfyui; \
     if [ "$WITH_COMFYUI" != "1" ]; then echo "WITH_COMFYUI=0 — pulando ComfyUI"; exit 0; fi; \
     rm -rf /var/lib/apt/lists/*; \
-    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends git ca-certificates python3-venv; \
     rm -rf /var/lib/apt/lists/*; \
     git clone --filter=blob:none https://github.com/comfyanonymous/ComfyUI.git /out/comfyui/app; \
@@ -439,7 +439,7 @@ RUN set -eux; \
     mkdir -p /out/kokoro; \
     if [ "$WITH_KOKORO" != "1" ]; then echo "WITH_KOKORO=0 — pulando Kokoro"; exit 0; fi; \
     rm -rf /var/lib/apt/lists/*; \
-    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends git ca-certificates python3-venv espeak-ng espeak-ng-data libsndfile1; \
     rm -rf /var/lib/apt/lists/*; \
     git clone --filter=blob:none https://github.com/remsky/Kokoro-FastAPI.git /out/kokoro/app; \
@@ -466,7 +466,7 @@ RUN set -eux; \
     mkdir -p /out/qwen3-tts; \
     if [ "$WITH_QWEN3TTS" != "1" ]; then echo "WITH_QWEN3TTS=0 — pulando Qwen3-TTS"; exit 0; fi; \
     rm -rf /var/lib/apt/lists/*; \
-    apt-get -o Acquire::Retries=3 update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends git ca-certificates python3-venv ffmpeg libsndfile1 sox libsox-dev build-essential; \
     rm -rf /var/lib/apt/lists/*; \
     git clone --filter=blob:none https://github.com/groxaxo/Qwen3-TTS-Openai-Fastapi.git /out/qwen3-tts/app; \
@@ -504,7 +504,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # /usr/lib/<arch>/espeak-ng-data.
 # -----------------------------------------------------------------------------
 RUN set -eux; \
-    apt-get update; \
+    apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
     apt-get install -y --no-install-recommends curl ca-certificates jq \
       ffmpeg libsndfile1 sox espeak-ng espeak-ng-data libgomp1; \
     rm -rf /var/lib/apt/lists/*; \
