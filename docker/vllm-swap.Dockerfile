@@ -26,14 +26,14 @@
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
 #   # reprodutivel no commit atual do fork (main, checado em 2026-09-15):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482 -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
 #
 # O llama-swap e COMPILADO a partir do fork eduardofbrito/llama-swap,
 # porque as features dele nao estao em nenhuma release upstream
-# (commits 8f2b0b2..106591a, todos em main; HEAD checado em 2026-09-15):
+# (commits 8f2b0b2..ad23013, todos em main; HEAD checado em 2026-09-15):
 #   - seletor de GPU por modelo + pagina GPUs na UI
 #   - aba Conf: edicao do config.yaml pela UI (ver --enable-config-api abaixo)
 #   - manualOnly: modelo que nunca carrega sob demanda (503 rapido)
@@ -48,10 +48,15 @@
 #     deste arquivo: precisa de VLLM_SERVER_DEV_MODE=1 e --enable-sleep-mode
 #   - uiApiKeys: chave separada pro dashboard/API de controle, distinta da
 #     chave de inferencia (ver --enable-config-api abaixo)
-#   (5 commits novos desde o pin anterior, 56bea6b: separacao
+#   (8 commits novos desde o pin anterior, 56bea6b: separacao
 #   apiKeys/uiApiKeys, correcao dos caminhos do Kokoro no wrapper, o sleepMode,
-#   uiApiKeys deixando de trancar a inferencia, e a correcao do vramCheck
-#   abaixo)
+#   uiApiKeys deixando de trancar a inferencia, a correcao do vramCheck abaixo,
+#   uma cor por estado na UI, e a instrumentacao de tempo do swap — esta
+#   ultima e o que permite ver onde um swap lento gasta o tempo:
+#     group: evicted [modelA] in 3m52s, now loading modelB
+#     group: swapped to modelB in 3m53s (evictions 3m52s, load 1.1s)
+#     <modelA> slept in 13.7s ...   <modelB> woke from sleep in 914ms
+#   com logLevel: info, que ja e o default desta imagem)
 # Build em estagios:
 #   1. node:24-slim   -> build da UI (Svelte/Vite)
 #   2. golang:1.27.1  -> go build -tags embed_ui (UI embutida no binario)
@@ -159,7 +164,7 @@ ARG TORCH_INDEX_URL=
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482
+ARG LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea
 
 RUN set -eux; \
     apt-get update; \
@@ -178,7 +183,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=106591a2aebc76c29d0be7b1e956089300211482
+ARG LLAMA_SWAP_REF=ad2301326a80b88d6064e83790e853c8fa7664ea
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
