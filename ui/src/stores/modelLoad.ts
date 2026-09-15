@@ -36,13 +36,24 @@ export function isPending(id: string): boolean {
   return val;
 }
 
+/** States the load button can start from. A sleeping model is loadable too:
+ *  the same request wakes it, in about a second instead of a cold start. */
+function isLoadable(m: Model): boolean {
+  return m.state === "stopped" || m.state === "sleeping";
+}
+
 export function onToggleLoad(m: Model): void {
-  if (m.state === "stopped" && isPending(m.id)) {
+  if (isLoadable(m) && isPending(m.id)) {
     cancelLoad(m.id);
-  } else if (m.state === "stopped") {
+  } else if (isLoadable(m)) {
     // Pass the user's GPU choice (if any) for this model; an undefined value
     // means "use the GPU configured for the model".
-    void handleLoadModel(m.id, getGpuForModel(m.id));
+    //
+    // Never for a sleeping one, though: it is waiting on a live process that
+    // is bound to the GPU it started on, so the override could not be honoured
+    // and would only produce a warning server-side. Waking it where it is is
+    // the whole point.
+    void handleLoadModel(m.id, m.state === "sleeping" ? undefined : getGpuForModel(m.id));
   } else if (m.state === "ready") {
     void unloadSingleModel(m.id);
   }

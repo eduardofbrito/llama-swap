@@ -3,8 +3,8 @@ title: Routing capacity and request queues
 summary: Configure concurrencyLimit and globalConcurrencyLimit, and understand queued work while a model is loading or busy.
 category: guides
 tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests, global-concurrency-limit, rate-limit, manual-only, fallback, 503, recent-pool, lru, eviction, vram, gpu-memory, oom, insufficient-vram, sleep-mode, vllm, swap-latency, cold-start, wake]
-config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, models.*.vramMB, models.*.sleepMode, routing.scheduler.settings.fifo.recentPoolSize, routing.scheduler.settings.fifo.vramCheck, routing.scheduler.settings.fifo.vramMarginPct, routing.scheduler.settings.fifo.evictBeyondPoolOnPressure]
-updated: 2026-09-14
+config_keys: [routing, models.*.concurrencyLimit, globalConcurrencyLimit, models.*.manualOnly, models.*.vramMB, models.*.sleepMode, routing.scheduler.settings.fifo.recentPoolSize, routing.scheduler.settings.fifo.vramCheck, routing.scheduler.settings.fifo.vramMarginPct, routing.scheduler.settings.fifo.evictBeyondPoolOnPressure, routing.scheduler.settings.fifo.maxSleepingPerGPU]
+updated: 2026-09-15
 ---
 
 # Routing capacity and request queues
@@ -203,6 +203,27 @@ free". What you get is rotation *within* each card: the group spreads models
 across devices at cold-start time, and sleeping makes re-activation cheap on
 the card each model was given. Size the group accordingly — one or two sleepers
 per card, not five.
+
+`maxSleepingPerGPU` turns that sizing into a rule instead of arithmetic you
+have to redo every time the group grows:
+
+```yaml
+routing:
+  scheduler:
+    use: fifo
+    settings:
+      fifo:
+        maxSleepingPerGPU: 1
+```
+
+Once a device is at the cap, parking another model there stops the one that has
+been asleep longest — which is also the least recently used, since a model
+serves right up to the moment it is evicted. The default, `0`, is no cap and
+the behaviour sleeping had before this setting existed.
+
+Use it when the group has more members than devices plus one. Below that a card
+never collects a second sleeper anyway, and the cap costs nothing but also does
+nothing.
 
 Two further interactions worth knowing:
 

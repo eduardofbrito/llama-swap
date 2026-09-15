@@ -889,7 +889,13 @@
                                             "default": 5,
                                             "description": "Headroom kept free on top of a model's VRAM requirement, as a percentage of it. Runtimes allocate more than the weights (KV cache growth, fragmentation, CUDA context). A negative value disables the margin. Only used when vramCheck is on."
                                         },
-                                        "evictBeyondPoolOnPressure": {
+                                        "maxSleepingPerGPU": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "Caps how many models may sit asleep on one GPU at a time (0 = no cap). Sleeping does not free the whole card: the process stays alive and keeps its CUDA context, 4-6 GB on vLLM, and a sleeping model is never evicted again — so without a cap that residue accumulates until the resident model can no longer get the fraction of the card it asks for. When the cap is reached, the model asleep longest on that device is stopped outright."
+                        },
+                        "evictBeyondPoolOnPressure": {
                                             "type": "boolean",
                                             "default": false,
                                             "description": "When a load does not fit, give up the evictions recentPoolSize was holding back rather than refusing the request. Trades the pool's retention for availability. With it off (the default) the pool is honoured and the request gets an HTTP 503 with error code insufficient_vram."

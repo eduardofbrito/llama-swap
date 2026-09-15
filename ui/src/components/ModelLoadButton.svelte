@@ -19,12 +19,18 @@
 <button
   type="button"
   class="text-muted-foreground hover:bg-accent hover:text-accent-foreground flex {btnSize} shrink-0 items-center justify-center disabled:opacity-50"
-  title={model.state === "ready" ? "Unload" : $pendingLoads[model.id] ? "Cancel" : "Load"}
-  aria-label={model.state === "ready" ? "Unload model" : "Load model"}
+  title={model.state === "ready"
+    ? "Unload"
+    : $pendingLoads[model.id]
+      ? "Cancel"
+      : model.state === "sleeping"
+        ? "Wake"
+        : "Load"}
+  aria-label={model.state === "ready" ? "Unload model" : model.state === "sleeping" ? "Wake model" : "Load model"}
   disabled={busy}
   onclick={() => onToggleLoad(model)}
 >
-  {#if $pendingLoads[model.id] && model.state === "stopped"}
+  {#if $pendingLoads[model.id] && (model.state === "stopped" || model.state === "sleeping")}
     <Loader2 class="{iconSize} animate-spin" />
   {:else if model.state === "ready"}
     <PowerOff class={iconSize} />

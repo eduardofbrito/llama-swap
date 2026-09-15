@@ -56,6 +56,12 @@ type baseRouter struct {
 	// devices places a group's members across the GPUs the group declared.
 	// nil when no group declares any, which is the common case.
 	devices *deviceAssigner
+	// sleptAt records when each sleeping model went to sleep, so the cap on
+	// sleepers per GPU can pick the one to give up. Entries are added on a
+	// successful sleep and removed when the model stops or wakes; eviction
+	// runs its members in parallel, hence the mutex.
+	sleptMu sync.Mutex
+	sleptAt map[string]time.Time
 	// processes is the live model->process map, read via processesAt(). Like
 	// config it is swapped atomically (copy-on-write) by a refresh, so the
 	// map a running request captured stays consistent for its whole life.
@@ -121,6 +127,7 @@ func newBaseRouter(
 		upstreamlog: upstreamlog,
 		vram:        newVRAMGuard(conf, oracle),
 		devices:     newDeviceAssigner(conf),
+		sleptAt:     make(map[string]time.Time),
 		shutdownCtx: shutdownCtx,
 		shutdownFn:  shutdownFn,
 		procCtx:     procCtx,
@@ -467,14 +474,116 @@ func (b *baseRouter) evict(id string, p process.Process, timeout time.Duration) 
 	if b.configAt().Models[id].SleepMode {
 		if sleeper, ok := p.(process.ProcessWithSleep); ok {
 			if err := sleeper.Sleep(timeout); err == nil {
+				// The cap runs only for a model this call actually put to
+				// sleep, and only after the fact. Eviction is asked to evict
+				// plenty that add no residue — one already stopped, one
+				// already asleep — and a swap evicts its models in parallel,
+				// so letting every one of them enforce the cap has them stop
+				// each other depending on which goroutine gets there first.
+				if newlyAsleep := b.noteSlept(id); newlyAsleep {
+					b.capSleepersOn(b.deviceOf(id), id, timeout)
+				}
 				return
 			} else {
 				b.logger.Warnf("%s: sleeping %s failed (%v); stopping it instead", b.name, id, err)
 			}
 		}
 	}
+	b.noteAwake(id)
 	if err := p.Stop(timeout); err != nil {
 		b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
+	}
+}
+
+// deviceOf reports the GPU a model occupies: the device its process actually
+// loaded onto, falling back to the one its config pins. The process is the
+// better answer when it has one (a group placement or a per-request override
+// may have sent it somewhere its env does not name), but it reports nothing
+// until a load has happened, and the config still says where it will land.
+func (b *baseRouter) deviceOf(modelID string) string {
+	if dev := b.ProcessGPU(modelID); dev != "" {
+		return dev
+	}
+	return process.DefaultGPU(b.configAt().Models[modelID].Env)
+}
+
+// noteSlept records when a model went to sleep, keeping the ORIGINAL time if
+// it was already asleep. The router can be asked to evict a sleeping model
+// again (the planner works from a snapshot), and refreshing the timestamp
+// there would make the longest-asleep model look like the newest one, which
+// is exactly backwards for choosing who to give up.
+// It reports whether this call is what put the model to sleep, so only that
+// caller enforces the cap.
+func (b *baseRouter) noteSlept(id string) (newlyAsleep bool) {
+	b.sleptMu.Lock()
+	defer b.sleptMu.Unlock()
+	if _, already := b.sleptAt[id]; already {
+		return false
+	}
+	b.sleptAt[id] = time.Now()
+	return true
+}
+
+func (b *baseRouter) noteAwake(id string) {
+	b.sleptMu.Lock()
+	defer b.sleptMu.Unlock()
+	delete(b.sleptAt, id)
+}
+
+// capSleepersOn enforces maxSleepingPerGPU for one device after evicting has
+// just parked a model there, stopping the longest-asleep of the OTHERS until
+// the device is back within the cap.
+//
+// Sleeping does not free the whole card — the process keeps its CUDA context,
+// 4-6 GB on vLLM — and a sleeping model is never evicted again, so without
+// this nothing ever bounds that residue and it accumulates until a ttl fires.
+// The resident model on that card is what pays: it asks for a fraction of the
+// card's total and fails to start when the residue has eaten into it.
+//
+// Longest-asleep is the right one to give up because it is also the
+// least-recently-used: a model served right up to the moment it was evicted,
+// so an older sleep means an older last use.
+func (b *baseRouter) capSleepersOn(device, evicting string, timeout time.Duration) {
+	limit := b.configAt().Routing.Scheduler.Settings.Fifo.MaxSleepingPerGPU
+	if limit <= 0 || device == "" {
+		return
+	}
+
+	// Collect who is asleep on this device, oldest sleep first.
+	type sleeper struct {
+		id   string
+		when time.Time
+	}
+	var asleep []sleeper
+	b.sleptMu.Lock()
+	for id, when := range b.sleptAt {
+		if id != evicting && b.deviceOf(id) == device {
+			asleep = append(asleep, sleeper{id, when})
+		}
+	}
+	b.sleptMu.Unlock()
+
+	// The model that just slept holds one slot, so the others may fill at most
+	// limit-1.
+	keep := limit - 1
+	if len(asleep) <= keep {
+		return
+	}
+	sort.Slice(asleep, func(i, j int) bool { return asleep[i].when.Before(asleep[j].when) })
+
+	procs := b.processesAt()
+	for i := 0; i < len(asleep)-keep; i++ {
+		victim := asleep[i]
+		p, ok := procs[victim.id]
+		if !ok {
+			continue
+		}
+		b.logger.Infof("%s: device %s is over the sleeper cap (%d max); stopping %s, asleep the longest, to free its share of the card",
+			b.name, device, limit, victim.id)
+		b.noteAwake(victim.id)
+		if err := p.Stop(timeout); err != nil {
+			b.logger.Warnf("%s: stopping %s failed: %v", b.name, victim.id, err)
+		}
 	}
 }
 
@@ -490,6 +599,7 @@ func (b *baseRouter) StopProcesses(timeout time.Duration, ids []string) {
 		wg.Add(1)
 		go func(id string, p process.Process) {
 			defer wg.Done()
+			b.noteAwake(id)
 			if err := p.Stop(timeout); err != nil {
 				b.logger.Warnf("%s: stopping %s failed: %v", b.name, id, err)
 			}
@@ -584,6 +694,9 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		b.logger.Warnf("%s: starting %s failed: %v", b.name, modelID, err)
 	}
 	if err == nil {
+		// Whether this was a wake or a cold start, the model is serving now and
+		// no longer counts against its device's sleeper cap.
+		b.noteAwake(modelID)
 		// Split so a slow swap can be attributed without guessing: eviction
 		// time and load time are different problems with different fixes.
 		b.logger.Infof("%s: swapped to %s in %s (evictions %s, load %s)",

@@ -330,6 +330,25 @@ type FifoConfig struct {
 	// DefaultVramMarginPct when VramCheck is on.
 	VramMarginPct int `yaml:"vramMarginPct"`
 
+	// MaxSleepingPerGPU caps how many models may sit asleep on one GPU at the
+	// same time. 0, the default, is no cap.
+	//
+	// It exists because sleeping does not free the whole card: the process
+	// stays alive and keeps its CUDA context and whatever its runtime
+	// allocated outside the sleep allocator — 4-6 GB for vLLM, which reports
+	// it as "Sleep mode freed 65.37 GiB memory, 4.29 GiB memory is still in
+	// use". Sleepers accumulate, because a sleeping model holds no GPU memory
+	// worth reclaiming and is never evicted again, so nothing puts a bound on
+	// that residue. Three of them on one card is 15 GB the resident model
+	// cannot have, and a model asking for it via --gpu-memory-utilization
+	// fails to start rather than getting less.
+	//
+	// When the cap is reached, the model that has been asleep LONGEST on that
+	// device is stopped outright to make room. Longest-asleep is also
+	// least-recently-used: a model was serving right up to the moment it was
+	// evicted, so an older sleep means an older last use.
+	MaxSleepingPerGPU int `yaml:"maxSleepingPerGPU"`
+
 	// EvictBeyondPoolOnPressure lets a load that does not fit fall back to
 	// evicting models the recent-model pool was holding back, instead of being
 	// refused. It trades the pool's retention for availability: with it off

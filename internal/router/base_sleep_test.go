@@ -140,3 +140,107 @@ func TestBaseRouter_UnloadStopsSleepModeModel(t *testing.T) {
 		t.Errorf("a state = %s, want %s", got, process.StateStopped)
 	}
 }
+
+// capConfig builds a config where every model sleeps on eviction, pinned to
+// one device, with the per-GPU sleeper cap set to n.
+func capConfig(n int, device string, models ...string) config.Config {
+	conf := config.Config{HealthCheckTimeout: 5, Models: map[string]config.ModelConfig{}}
+	for _, id := range models {
+		conf.Models[id] = config.ModelConfig{
+			SleepMode: true,
+			Env:       []string{"CUDA_VISIBLE_DEVICES=" + device},
+		}
+	}
+	conf.Routing.Scheduler.Settings.Fifo.MaxSleepingPerGPU = n
+	return conf
+}
+
+// TestBaseRouter_SleeperCapStopsTheLongestAsleep is the point of the cap:
+// sleeping does not free the whole card (the process keeps its CUDA context),
+// and a sleeping model is never evicted again, so without a bound the residue
+// accumulates until the resident model can no longer get the fraction of the
+// card it asks for.
+func TestBaseRouter_SleeperCapStopsTheLongestAsleep(t *testing.T) {
+	a, bProc, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
+	for _, p := range []*fakeProcess{a, bProc, c} {
+		p.autoReady = true
+	}
+	// Everything evicts everything, so each request parks the previous model.
+	planner := &stubPlanner{evict: map[string][]string{
+		"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"},
+	}}
+	r := newTestBaseWithConfig(t, capConfig(1, "0", "a", "b", "c"),
+		map[string]process.Process{"a": a, "b": bProc, "c": c}, planner)
+
+	serve(t, r, "a")
+	serve(t, r, "b") // a sleeps: device 0 now has one sleeper, at the cap
+	if got := a.State(); got != process.StateSleeping {
+		t.Fatalf("a state = %s, want %s", got, process.StateSleeping)
+	}
+
+	serve(t, r, "c") // b wants to sleep too; a is the longest asleep and goes
+
+	if got := a.State(); got != process.StateStopped {
+		t.Errorf("a state = %s, want %s; the longest-asleep model must be stopped to stay within the cap", got, process.StateStopped)
+	}
+	if got := bProc.State(); got != process.StateSleeping {
+		t.Errorf("b state = %s, want %s; the most recent sleeper must be kept", got, process.StateSleeping)
+	}
+}
+
+// TestBaseRouter_SleeperCapOffKeepsEveryoneAsleep pins that the cap is opt-in:
+// 0 (the default) means no bound, which is how sleepMode behaved before it
+// existed.
+func TestBaseRouter_SleeperCapOffKeepsEveryoneAsleep(t *testing.T) {
+	a, bProc, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
+	for _, p := range []*fakeProcess{a, bProc, c} {
+		p.autoReady = true
+	}
+	planner := &stubPlanner{evict: map[string][]string{
+		"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"},
+	}}
+	r := newTestBaseWithConfig(t, capConfig(0, "0", "a", "b", "c"),
+		map[string]process.Process{"a": a, "b": bProc, "c": c}, planner)
+
+	serve(t, r, "a")
+	serve(t, r, "b")
+	serve(t, r, "c")
+
+	if got := a.State(); got != process.StateSleeping {
+		t.Errorf("a state = %s, want %s; with no cap every evicted model stays asleep", got, process.StateSleeping)
+	}
+	if got := bProc.State(); got != process.StateSleeping {
+		t.Errorf("b state = %s, want %s", got, process.StateSleeping)
+	}
+}
+
+// TestBaseRouter_SleeperCapIsPerDevice: the cap counts sleepers on ONE card.
+// Models parked on a different GPU are not competing for the same memory and
+// must not be stopped to make room.
+func TestBaseRouter_SleeperCapIsPerDevice(t *testing.T) {
+	a, bProc, c := newFakeProcess("a"), newFakeProcess("b"), newFakeProcess("c")
+	for _, p := range []*fakeProcess{a, bProc, c} {
+		p.autoReady = true
+	}
+	conf := capConfig(1, "0", "b", "c")    // b and c on device 0
+	conf.Models["a"] = config.ModelConfig{ // a on device 1
+		SleepMode: true,
+		Env:       []string{"CUDA_VISIBLE_DEVICES=1"},
+	}
+	planner := &stubPlanner{evict: map[string][]string{
+		"a": {"b", "c"}, "b": {"a", "c"}, "c": {"a", "b"},
+	}}
+	r := newTestBaseWithConfig(t, conf,
+		map[string]process.Process{"a": a, "b": bProc, "c": c}, planner)
+
+	serve(t, r, "a")
+	serve(t, r, "b") // a sleeps on device 1
+	serve(t, r, "c") // b sleeps on device 0 — a different card, so a stays
+
+	if got := a.State(); got != process.StateSleeping {
+		t.Errorf("a state = %s, want %s; a sleeper on another GPU must not be stopped", got, process.StateSleeping)
+	}
+	if got := bProc.State(); got != process.StateSleeping {
+		t.Errorf("b state = %s, want %s; it is the only sleeper on device 0", got, process.StateSleeping)
+	}
+}
