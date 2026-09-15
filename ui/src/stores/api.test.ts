@@ -10,6 +10,7 @@ import {
   getHardware,
   handleAPIEventMessage,
   hasListedModels,
+  loadModel,
   inFlightRequests,
   inflightRequestEntries,
   models,
@@ -309,5 +310,22 @@ describe("api store event handling", () => {
     await first;
 
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("loadModel", () => {
+  it("treats a 404 from the upstream as a loaded model", async () => {
+    // vLLM has no route at /, so a healthy one answers 404 to the probe the
+    // load button sends. Reporting that as a failure told the user the load
+    // had failed after they had waited out the whole load.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404 }));
+
+    await expect(loadModel("vllm-model")).resolves.toBeUndefined();
+  });
+
+  it("still fails when the router refuses the load", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+
+    await expect(loadModel("too-big")).rejects.toThrow("Failed to load model: 503");
   });
 });

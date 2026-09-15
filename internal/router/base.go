@@ -143,6 +143,10 @@ func newBaseRouter(
 	}
 	b.config.Store(confPtr)
 	b.processes.Store(&processes)
+	// The guard can only see configured devices on its own; deviceOf adds the
+	// device a running model was actually placed on, which is the only answer
+	// there is for a group that assigns GPUs dynamically.
+	b.vram.runningDeviceOf = b.deviceOf
 	sched, err := scheduler.New(conf, name, logger, planner, b)
 	if err != nil {
 		return nil, err

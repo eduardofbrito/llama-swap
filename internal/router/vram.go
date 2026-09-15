@@ -49,6 +49,18 @@ type VRAMOracle interface {
 type vramGuard struct {
 	oracle VRAMOracle
 
+	// runningDeviceOf reports the GPU a model is on RIGHT NOW, read from live
+	// process state. The router wires it in; a nil func (tests, a guard built
+	// standalone) falls back to the configured device.
+	//
+	// It exists because deviceOf below can only see what the config pins, and
+	// a model in a group with `gpus:` pins nothing — the device assigner picks
+	// one at load time. Without this, every evictee in such a group resolved
+	// to "", the memory it was about to give back was credited to a device
+	// that does not exist, and the target was refused for the full size of a
+	// model that was already on its way out.
+	runningDeviceOf func(string) string
+
 	mu sync.RWMutex
 	// cfg and models are swapped on a surgical reload, so they are guarded
 	// rather than captured once.
@@ -109,6 +121,24 @@ func (g *vramGuard) deviceOf(modelID string) string {
 	return process.DefaultGPU(mc.Env)
 }
 
+// evicteeDevice resolves the GPU an about-to-be-evicted model occupies: where
+// it actually is, falling back to where the config pins it. ok is false when
+// neither answers, which admits the target — the same rule requirementMB
+// follows, and for the same reason: a device the guard cannot name makes the
+// whole sum meaningless, and refusing on ignorance turns a gap in the guard's
+// knowledge into an outage.
+func (g *vramGuard) evicteeDevice(modelID string) (string, bool) {
+	if g.runningDeviceOf != nil {
+		if dev := g.runningDeviceOf(modelID); dev != "" {
+			return dev, true
+		}
+	}
+	if dev := g.deviceOf(modelID); dev != "" {
+		return dev, true
+	}
+	return "", false
+}
+
 // shortfallMB reports how much VRAM is still missing for modelID to load after
 // the models in evict are stopped, on the device it would load onto. Zero means
 // there is room — or that the guard cannot answer, in which case the model is
@@ -164,7 +194,11 @@ func (g *vramGuard) shortfallMB(modelID, device string, evict []string) int {
 		if !ok {
 			return 0
 		}
-		freed[g.deviceOf(id)] += mb
+		dev, ok := g.evicteeDevice(id)
+		if !ok {
+			return 0
+		}
+		freed[dev] += mb
 	}
 
 	available := func(dev string) int {

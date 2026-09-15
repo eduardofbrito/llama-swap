@@ -392,6 +392,25 @@ func (d *discardResponseWriter) Write(p []byte) (int, error) { return len(p), ni
 
 func (d *discardResponseWriter) WriteHeader(status int) { d.status = status }
 
+// loadProbeSucceeded reports whether a bare GET / against a model means the
+// model is up.
+//
+// The probe exists to trigger a load, not to fetch anything: any answer from
+// the upstream proves the process is running and serving. llama-server happens
+// to return 200 for / (it serves a web UI there), but vLLM has no route at all
+// at /, so a perfectly healthy vLLM answers 404 — and a preload of it was
+// logged as a failure right after its own health check passed.
+//
+// 5xx and the router's own 503 (a refused or failed load) stay failures.
+func loadProbeSucceeded(status int) bool {
+	switch status {
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		// The upstream answered; it just has nothing at /.
+		return true
+	}
+	return status < http.StatusBadRequest
+}
+
 // startPreload fires a background GET / at every model named in
 // Hooks.OnStartup.Preload so they are warm before the first real request.
 // Preload names are already resolved to real model IDs by config loading.
@@ -417,7 +436,7 @@ func (s *Server) startPreload() {
 			dw := &discardResponseWriter{status: http.StatusOK}
 			s.local.ServeHTTP(dw, req)
 
-			success := dw.status < http.StatusBadRequest
+			success := loadProbeSucceeded(dw.status)
 			if !success {
 				s.proxylog.Errorf("failed to preload model %s: status %d", modelID, dw.status)
 			}

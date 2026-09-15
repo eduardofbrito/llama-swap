@@ -327,3 +327,53 @@ func TestVRAMGuard_ObserveLoadExplainsAFlatReading(t *testing.T) {
 		t.Error("no reason given; a model that never gets measured must be diagnosable")
 	}
 }
+
+// TestVRAMGuard_CreditsAnEvicteeOnItsRunningDevice reproduces the second
+// production refusal: a rotating group of five models over two GPUs, declared
+// with `gpus: ["0", "1"]` so the assigner places them, where every swap past
+// the second was refused — "refusing to load qwen3.6-35b-a3b, short 62294 MB
+// of GPU memory" — and, because no eviction ever ran, no model ever slept.
+//
+// The models in such a group pin no device in their env, so the guard resolved
+// every evictee's device to "" and added the memory it was about to give back
+// to a bucket no reading is keyed by. The target was then compared against a
+// GPU still holding the model that was leaving it.
+func TestVRAMGuard_CreditsAnEvicteeOnItsRunningDevice(t *testing.T) {
+	// Two 80 GB cards, each holding one member of the group.
+	oracle := newFakeOracle(map[string]DeviceMemory{
+		"0": {UsedMB: 70000, TotalMB: 81920},
+		"1": {UsedMB: 75000, TotalMB: 81920},
+	})
+	// No CUDA_VISIBLE_DEVICES on any of them: the group assigns the device.
+	unpinned := func(vramMB int) config.ModelConfig {
+		return config.ModelConfig{VramMB: vramMB}
+	}
+	g := newVRAMGuard(vramConfig(map[string]config.ModelConfig{
+		"target":    unpinned(71800),
+		"resident0": unpinned(69300),
+		"resident1": unpinned(74800),
+	}), oracle)
+
+	// Without the router's help the guard has nothing to go on and admits,
+	// rather than refusing for a device it cannot name.
+	if got := g.shortfallMB("target", "", []string{"resident0"}); got != 0 {
+		t.Errorf("unwired shortfall = %d, want 0", got)
+	}
+
+	// Wired to live process state, the eviction is credited to GPU 0, which is
+	// where resident0 actually is: 81920 - 70000 + 69300 = 81220, and the
+	// target needs 71800.
+	g.runningDeviceOf = func(id string) string {
+		return map[string]string{"resident0": "0", "resident1": "1"}[id]
+	}
+	if got := g.shortfallMB("target", "", []string{"resident0"}); got != 0 {
+		t.Errorf("shortfall = %d, want 0; evicting resident0 hands GPU 0 back", got)
+	}
+
+	// The arithmetic is still real: crediting GPU 1 does not help a target
+	// that will land on GPU 0, and the roomiest device is what decides.
+	// Evicting nobody leaves 11920 free on GPU 0 and 6920 on GPU 1.
+	if got := g.shortfallMB("target", "", nil); got != 71800-11920 {
+		t.Errorf("shortfall with no eviction = %d, want %d", got, 71800-11920)
+	}
+}

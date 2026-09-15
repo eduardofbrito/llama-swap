@@ -314,10 +314,19 @@ Every case where the guard cannot answer honestly admits the model, so turning
   `CUDA_VISIBLE_DEVICES=0,1`;
 - a host that reports no GPU memory at all (no performance monitor, CPU-only);
 - a model that is already loaded — it holds its memory already, and re-checking
-  would double-count it.
+  would double-count it;
+- a swap whose evicted model cannot be located on any GPU — the free memory
+  after that swap is unknowable, not zero.
 
 A model that pins no GPU is checked against the device with the most free
 memory, since that is where it has the best chance of fitting.
+
+In a group with `gpus:`, members pin no device in their own `env` — the group
+assigns one at load time. The guard reads the device an evicted model is
+*running* on, not the one its config names, so the memory a swap is about to
+free is credited to the right card. A model that declares `vramMB` but is not
+running anywhere (and pins nothing) is the one case above where the guard
+gives up and admits.
 
 The failure mode to watch for: a model whose measured value came from a
 smaller context or `-ngl` than it now runs with will be admitted onto a GPU

@@ -474,7 +474,13 @@ export async function loadModel(model: string, signal?: AbortSignal, gpu?: strin
       method: "GET",
       signal,
     });
-    if (!response.ok) {
+    // The request is a trigger, not a fetch: reaching the upstream at all
+    // means the model is loaded and serving. llama-server answers 200 at /
+    // (it has a web UI there), vLLM has no route at / and answers 404 — so
+    // treating anything but 2xx as a failure reported every successful vLLM
+    // load as an error, after the user had waited out the whole load.
+    // A 503 (the router refused or the load failed) is still a failure.
+    if (!response.ok && response.status !== 404 && response.status !== 405) {
       throw new Error(`Failed to load model: ${response.status}`);
     }
   } catch (error) {
