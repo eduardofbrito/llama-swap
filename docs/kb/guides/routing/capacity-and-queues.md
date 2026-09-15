@@ -300,9 +300,27 @@ and a wrong requirement is worse than none. Run with `logLevel: debug` to see
 
 By default the request is refused and the recent-model pool keeps what it
 promised. `evictBeyondPoolOnPressure: true` reverses that trade: the pool's
-held-back evictions are given up so the load can proceed. Even then a request
-is refused when evicting everything still does not free enough — that is the
-signal that the memory belongs to something outside llama-swap.
+held-back evictions are given up so the load can proceed. Either way the pool
+is given up one model at a time, least recently used first, and only until
+there is room — not cleared. A model that is serving a request is never given
+up this way. A request is still refused when evicting everything available
+does not free enough: that is the signal that the memory belongs to something
+outside llama-swap.
+
+### Waking a sleeping model always outranks the pool
+
+A model put to sleep (`sleepMode`) does not need this setting to come back. It
+is a case the pool cannot reason about: a sleeper is bound to the GPU its
+process started on and cannot be placed elsewhere, it is not in the running set
+the pool sizes itself against, and it holds its CUDA context on that card the
+whole time it is asleep. The model that took its GPU over is by construction
+the most recently used one — exactly what the pool holds back — so without this
+the sleeper is refused for its full size forever, still holding GPU memory and
+serving nothing but 503s.
+
+So a wake escalates past the pool whatever `evictBeyondPoolOnPressure` says,
+and because freeing a card the sleeper is not on does not reduce its shortfall,
+what it ends up evicting is whatever occupies the card it needs.
 
 ### What it deliberately does not do
 

@@ -9,6 +9,7 @@
   import { playgroundActivity, docsAgentStreaming } from "../stores/playgroundActivity";
   import { performanceEnabled, models, tailcatStatus } from "../stores/api";
   import { showUnlistedModels } from "../stores/modelDisplay";
+  import { statusDotColor } from "../stores/modelLoad";
   import { modelsMenuOpen } from "../stores/sidebar";
   import type { Model } from "../lib/types";
   import { isComposingKey } from "../lib/ime";
@@ -44,18 +45,6 @@
     $models.filter((model) => model.peerID && ($showUnlistedModels || !model.unlisted)),
   );
 
-  type DotColor = "grey" | "yellow" | "green";
-  function statusDotColor(model: Model): DotColor {
-    if (model.state === "ready") return "green";
-    if (model.state === "starting" || model.state === "stopping") return "yellow";
-    return "grey";
-  }
-
-  const dotClass: Record<DotColor, string> = {
-    grey: "bg-muted-foreground/40",
-    yellow: "bg-warning",
-    green: "bg-success",
-  };
 </script>
 
 {#snippet modelMenuItem(model: Model)}
@@ -65,7 +54,7 @@
     >
       {#snippet child({ props })}
         <a href="/models/{encodeURIComponent(model.id)}" use:link {...props}>
-          <span class={`size-2 shrink-0 rounded-full ${dotClass[statusDotColor(model)]}`}></span>
+          <span class={`size-2 shrink-0 rounded-full ${statusDotColor(model)}`}></span>
           <span class="flex-1 truncate">{model.id}</span>
         </a>
       {/snippet}

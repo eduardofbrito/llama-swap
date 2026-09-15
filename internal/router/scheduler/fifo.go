@@ -355,6 +355,17 @@ func (s *FIFO) UpdateModel(model string, mc config.ModelConfig, remove bool) {
 // evictions are given up so the load can proceed, and the request is only
 // refused when even the swapper's full eviction set does not free enough.
 //
+// A sleeping target escalates regardless of that setting, because the pool
+// cannot reason about it and the alternative is a deadlock. A sleeper is
+// bound to the GPU its process started on and cannot be placed elsewhere; it
+// is not in the running set the pool sizes itself against; and it holds real
+// memory on that card the whole time it is asleep. The model that took over
+// its GPU is, by construction, the one used most recently — exactly the one
+// the pool holds back. So the sleeper is refused for the size of a model it
+// had a moment ago, forever: a permanent VRAM leak and a model that answers
+// nothing but 503. Waking it is an explicit request and outranks the pool's
+// implicit retention.
+//
 // state is the target's current process state: a model that is already ready
 // has its memory, and re-checking it would double-count what it already holds.
 func (s *FIFO) admitVRAM(target, device string, evict, running []string, state process.ProcessState) ([]string, int, bool) {
@@ -365,19 +376,86 @@ func (s *FIFO) admitVRAM(target, device string, evict, running []string, state p
 	if short == 0 {
 		return evict, 0, true
 	}
-	if !s.cfg.EvictBeyondPoolOnPressure {
+	waking := state == process.StateSleeping
+	if !s.cfg.EvictBeyondPoolOnPressure && !waking {
 		return evict, short, false
 	}
 
 	full := s.planner.EvictionFor(target, running)
-	if s.effects.VRAMShortfall(target, device, full) > 0 {
+	grown, ok := s.escalateEviction(target, device, evict, full)
+	if !ok {
 		// Even giving up the whole pool does not free enough: something
-		// outside llama-swap is holding the memory.
+		// outside llama-swap is holding the memory, or the only model that
+		// would help is busy serving.
 		return evict, short, false
 	}
-	s.logger.Infof("%s: %s is short %d MB; evicting beyond the recent pool to make room (evictBeyondPoolOnPressure)",
-		s.name, target, short)
-	return full, 0, true
+	why := "evictBeyondPoolOnPressure"
+	if waking {
+		why = "waking a sleeping model"
+	}
+	s.logger.Infof("%s: %s is short %d MB; evicting beyond the recent pool to make room (%s): %v",
+		s.name, target, short, why, grown)
+	return grown, 0, true
+}
+
+// escalateEviction grows evict with the models the pool held back, one at a
+// time, until the guard is satisfied. It returns ok=false when even the whole
+// set does not free enough.
+//
+// Two things decide the order. Candidates are given up least-recently-used
+// first, so the pool loses as little as it can and keeps what the operator is
+// most likely to want next. And a candidate on some other GPU does not move
+// the shortfall at all, so the loop simply walks past it — which is what makes
+// this land on the model occupying the device the target actually needs,
+// without the scheduler having to know anything about devices.
+//
+// A model that is serving a request is never given up here. The in-flight
+// check upstream ran against the smaller set, so escalation is the one place
+// that could newly nominate a busy process; refusing is right, because the
+// caller retries once the request drains.
+func (s *FIFO) escalateEviction(target, device string, evict, full []string) ([]string, bool) {
+	inEvict := make(map[string]struct{}, len(evict))
+	for _, id := range evict {
+		inEvict[id] = struct{}{}
+	}
+	held := make([]string, 0, len(full))
+	for _, id := range full {
+		if _, already := inEvict[id]; already {
+			continue
+		}
+		if s.inFlight[id] > 0 {
+			continue
+		}
+		held = append(held, id)
+	}
+	if len(held) == 0 {
+		return evict, false
+	}
+
+	// s.recentPool is most-recently-used first, so a higher index is older.
+	// Anything the pool never saw is older still and goes first.
+	rank := make(map[string]int, len(s.recentPool))
+	for i, id := range s.recentPool {
+		rank[id] = i
+	}
+	sort.SliceStable(held, func(i, j int) bool {
+		ri, seenI := rank[held[i]]
+		rj, seenJ := rank[held[j]]
+		if seenI != seenJ {
+			return !seenI
+		}
+		return ri > rj
+	})
+
+	grown := make([]string, len(evict), len(evict)+len(held))
+	copy(grown, evict)
+	for _, id := range held {
+		grown = append(grown, id)
+		if s.effects.VRAMShortfall(target, device, grown) == 0 {
+			return grown, true
+		}
+	}
+	return evict, false
 }
 
 // markModelUsed moves modelID to the front of the recency list. See the

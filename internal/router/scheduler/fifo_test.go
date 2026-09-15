@@ -1364,3 +1364,130 @@ func TestFIFO_VRAMCheckOffAdmitsEverything(t *testing.T) {
 		t.Errorf("starts = %d, want 1", len(eff.starts))
 	}
 }
+
+// TestFIFO_SleepingModelWakesByEvictingItsOwnGPU reproduces the deadlock a
+// rotating group hit in production, one swap after sleeping started working:
+//
+//	<soberano-v1.1> slept in 18.035s — GPU memory released, process kept alive
+//	group: evicted [soberano-v1.1] in 18.035s, now loading qwen3.6-35b-a3b
+//	...
+//	group: refusing to load soberano-v1.1, short 65433 MB of GPU memory
+//
+// The sleeper cannot change GPU — its process is alive and bound to the card
+// it started on — so the only eviction that frees room for it is the model
+// that took that card over. That model is the most recently used one, which is
+// exactly what the recent-model pool holds back, so the pool trimmed the
+// eviction set down to a sibling on the *other* GPU. Freeing that one moves
+// nothing, and the sleeper was refused for its whole size, permanently: it
+// went on holding its CUDA context on the card while answering only 503.
+func TestFIFO_SleepingModelWakesByEvictingItsOwnGPU(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["sleeper"] = process.StateSleeping // asleep on GPU 0
+	eff.states["tookGpu0"] = process.StateReady   // moved onto GPU 0 when it slept
+	eff.states["onGpu1"] = process.StateReady     // busy holding the other card
+
+	// Only giving up the model on GPU 0 makes room for the sleeper; the
+	// sibling on GPU 1 is irrelevant to it, exactly as the real guard reports.
+	eff.vramShortfallFor = func(modelID string, evict []string) int {
+		if modelID != "sleeper" {
+			return 0
+		}
+		if containsString(evict, "tookGpu0") {
+			return 0
+		}
+		return 65433
+	}
+
+	planner := &stubPlanner{evict: map[string][]string{
+		"sleeper": {"onGpu1", "tookGpu0"},
+	}}
+	// PoolSize 2 is what `gpus: ["0", "1"]` sets for every member of the group.
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), planner,
+		config.FifoConfig{RecentPoolSize: 2}, nil, eff)
+	// tookGpu0 is the most recently used, so the pool protects it first.
+	s.recentPool = []string{"tookGpu0", "onGpu1"}
+
+	r := req("sleeper")
+	s.OnRequest(r)
+
+	if n := len(eff.grants); n > 0 && eff.grants[0].err != nil {
+		t.Fatalf("sleeper was refused (%v); it must be allowed to reclaim its own GPU", eff.grants[0].err)
+	}
+	if len(eff.starts) != 1 {
+		t.Fatalf("starts = %+v, want one swap for sleeper", eff.starts)
+	}
+	got := eff.starts[0]
+	if got.model != "sleeper" {
+		t.Fatalf("swapped to %q, want sleeper", got.model)
+	}
+	if !containsString(got.evict, "tookGpu0") {
+		t.Errorf("evict = %v, want it to include tookGpu0 — the only model whose "+
+			"eviction frees the GPU the sleeper is bound to", got.evict)
+	}
+}
+
+// TestFIFO_EscalationGivesUpTheLeastRecentlyUsedFirst pins that escalating past
+// the pool is not a licence to clear it: the set grows one model at a time,
+// oldest first, and stops as soon as there is room.
+func TestFIFO_EscalationGivesUpTheLeastRecentlyUsedFirst(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["sleeper"] = process.StateSleeping
+	eff.states["hot"] = process.StateReady
+	eff.states["warm"] = process.StateReady
+	eff.states["cold"] = process.StateReady
+
+	// Any one eviction is enough here, so the choice is purely about recency.
+	eff.vramShortfallFor = func(modelID string, evict []string) int {
+		if modelID != "sleeper" || len(evict) > 0 {
+			return 0
+		}
+		return 40000
+	}
+
+	planner := &stubPlanner{evict: map[string][]string{
+		"sleeper": {"hot", "warm", "cold"},
+	}}
+	// A pool of 4 holds all three back, so escalation picks every one of them.
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), planner,
+		config.FifoConfig{RecentPoolSize: 4}, nil, eff)
+	s.recentPool = []string{"hot", "warm", "cold"}
+
+	s.OnRequest(req("sleeper"))
+
+	if len(eff.starts) != 1 {
+		t.Fatalf("starts = %+v, want one swap", eff.starts)
+	}
+	if got := eff.starts[0].evict; len(got) != 1 || got[0] != "cold" {
+		t.Errorf("evict = %v, want [cold] — the least recently used, and no more", got)
+	}
+}
+
+// TestFIFO_EscalationSparesAModelThatIsServing pins that escalation never
+// nominates a busy process. The in-flight check upstream ran against the
+// smaller eviction set, so this is the one path that could newly reach one.
+func TestFIFO_EscalationSparesAModelThatIsServing(t *testing.T) {
+	eff := newFakeEffects()
+	eff.states["sleeper"] = process.StateSleeping
+	eff.states["busy"] = process.StateReady
+
+	eff.vramShortfallFor = func(modelID string, evict []string) int {
+		if modelID != "sleeper" || containsString(evict, "busy") {
+			return 0
+		}
+		return 65433
+	}
+
+	planner := &stubPlanner{evict: map[string][]string{"sleeper": {"busy"}}}
+	s := NewFIFO("test", logmon.NewWriter(io.Discard), planner,
+		config.FifoConfig{RecentPoolSize: 2}, nil, eff)
+	s.recentPool = []string{"busy"}
+	s.inFlight = map[string]int{"busy": 1}
+
+	s.OnRequest(req("sleeper"))
+
+	for _, st := range eff.starts {
+		if containsString(st.evict, "busy") {
+			t.Fatalf("evicted a model that is serving: %+v", st)
+		}
+	}
+}

@@ -4,7 +4,7 @@
   import { Gpu as GpuIcon, ArrowUpToLine, ArrowDownToLine, TriangleAlert } from "@lucide/svelte";
   import { gpus, models, unloadSingleModel, fetchGpus } from "../stores/api";
   import { formatGpuMemory, gpuMemoryPct } from "../lib/format";
-  import { handleLoadModel } from "../stores/modelLoad";
+  import { handleLoadModel, statusDotColor } from "../stores/modelLoad";
   import type { GpuInfo, Model } from "../lib/types";
   import { cn } from "$lib/utils.js";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -131,25 +131,6 @@
   function barClass(status: GpuStatus): string {
     return status === "external" ? "bg-warning" : "bg-success";
   }
-
-  type DotColor = "grey" | "yellow" | "green" | "blue" | "red";
-  // Kept in step with statusDotColor in stores/modelLoad, so a model does not
-  // change colour between here and the Models page.
-  function statusDotColor(model: Model): DotColor {
-    if (model.state === "ready") return "green";
-    if (model.state === "sleeping") return "yellow";
-    if (model.state === "starting") return "blue";
-    if (model.state === "stopping") return "red";
-    return "grey";
-  }
-
-  const dotClass: Record<DotColor, string> = {
-    grey: "bg-muted-foreground/40",
-    yellow: "bg-warning",
-    green: "bg-success",
-    blue: "bg-primary",
-    red: "bg-destructive",
-  };
 </script>
 
 <div class="p-2">
@@ -222,7 +203,7 @@
                 {@const key = keyOf(gpu, model)}
                 <li class="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
                   <a href="/models/{encodeURIComponent(model.id)}" use:link class="flex flex-1 items-center gap-2">
-                    <span class={`size-2 shrink-0 rounded-full ${dotClass[statusDotColor(model)]}`}></span>
+                    <span class={`size-2 shrink-0 rounded-full ${statusDotColor(model)}`}></span>
                     <span class="truncate font-medium">{model.id}</span>
                   </a>
                   <span

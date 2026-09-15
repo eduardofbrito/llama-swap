@@ -672,3 +672,32 @@ func TestServer_APIEvents_InitialPayload(t *testing.T) {
 		}
 	}
 }
+
+// TestServer_ModelStatus_ReportsSleeping pins that a sleeping model reaches the
+// dashboard as "sleeping" rather than collapsing into "stopped".
+//
+// The UI keys everything off this string: the yellow status dot, the sleeping
+// badge, and — the one that matters most — whether the load button wakes the
+// model or tries to cold-start it. A sleeping model reported as stopped is
+// indistinguishable from one that was never loaded.
+func TestServer_ModelStatus_ReportsSleeping(t *testing.T) {
+	local := newStubRouter(nil, "")
+	s := newTestServer(local, newStubRouter(nil, ""))
+	s.SetCfg(config.Config{Models: map[string]config.ModelConfig{
+		"napping": {},
+		"cold":    {},
+	}})
+
+	local.running = map[string]process.ProcessState{"napping": process.StateSleeping}
+
+	byID := make(map[string]apiModel)
+	for _, m := range s.modelStatus() {
+		byID[m.Id] = m
+	}
+	if got := byID["napping"].State; got != string(process.StateSleeping) {
+		t.Errorf("napping state = %q, want %q", got, process.StateSleeping)
+	}
+	if got := byID["cold"].State; got != "stopped" {
+		t.Errorf("cold state = %q, want stopped", got)
+	}
+}
