@@ -26,7 +26,7 @@
 #   docker build -f docker/vllm-swap.Dockerfile -t vllm-swap . --no-cache
 #   # reprodutivel no commit atual do fork (main, checado em 2026-09-15):
 #   docker build -f docker/vllm-swap.Dockerfile \
-#     --build-arg LLAMA_SWAP_REF=b1deee72ffc85f440b6d9e4b90d60126772a88c4 -t vllm-swap .
+#     --build-arg LLAMA_SWAP_REF=de1eb8ecdabe035b5daacf3489be71ce074751cc -t vllm-swap .
 #   # ou aponte para uma tag/release do fork quando existir:
 #   docker build -f docker/vllm-swap.Dockerfile \
 #     --build-arg LLAMA_SWAP_REF=v0.1-gpu -t vllm-swap .
@@ -164,7 +164,7 @@ ARG TORCH_INDEX_URL=
 # ---------------------------------------------------------------------------
 FROM node:24-slim AS ui
 
-ARG LLAMA_SWAP_REF=b1deee72ffc85f440b6d9e4b90d60126772a88c4
+ARG LLAMA_SWAP_REF=de1eb8ecdabe035b5daacf3489be71ce074751cc
 
 RUN set -eux; \
     apt-get -o Acquire::Retries=3 update || { echo "FALHA no apt-get update. Se a mensagem foi \"At least one invalid signature was encountered\" em TODOS os repositorios, o problema NAO e chave de GPG: e DISCO CHEIO no host do Docker — o InRelease chega truncado e a assinatura nao confere. Rode 'df -h /var/lib/docker' e libere espaco com 'docker system prune -af --volumes'. Este build precisa de ~150 GB livres com tudo ligado." >&2; exit 1; }; \
@@ -183,7 +183,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 FROM golang:1.27.1 AS go-build
 
-ARG LLAMA_SWAP_REF=b1deee72ffc85f440b6d9e4b90d60126772a88c4
+ARG LLAMA_SWAP_REF=de1eb8ecdabe035b5daacf3489be71ce074751cc
 
 WORKDIR /src/llama-swap
 RUN set -eux; \
