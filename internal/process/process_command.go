@@ -149,7 +149,10 @@ type ProcessCommand struct {
 	// Written only by run(); read by ServeHTTP via atomic load.
 	handler atomic.Pointer[http.HandlerFunc]
 
-	lastUse  atomic.Int64 // unix nano timestamp of last ServeHTTP completion
+	// lastUse is the unix-nano baseline the TTL measures idleness from. It is
+	// set whenever the process becomes servable — a fresh start, and a wake
+	// from sleep — and refreshed after every ServeHTTP completes.
+	lastUse  atomic.Int64
 	inflight atomic.Int64 // current in-flight ServeHTTP calls
 
 	// loadGpu holds the CUDA_VISIBLE_DEVICES value applied to the current
@@ -367,6 +370,13 @@ func (p *ProcessCommand) run() {
 					}
 					fn := liveHandler
 					p.handler.Store(&fn)
+					// A wake is activity, so it starts a fresh idle window
+					// exactly as a cold start does. The TTL keeps ticking
+					// while a model sleeps, so lastUse here is however long
+					// ago the model last served — possibly nearly the whole
+					// TTL. Without this a model could be stopped moments
+					// after coming back, having paid for the wake.
+					p.lastUse.Store(time.Now().UnixNano())
 					setState(StateReady)
 					p.proxyLogger.Infof("<%s> woke from sleep in %s", p.id, time.Since(wakeStart).Round(time.Millisecond))
 					notifyWaiters(nil)
@@ -405,6 +415,13 @@ func (p *ProcessCommand) run() {
 					liveHandler = fn
 					p.handler.Store(&fn)
 					p.loadGpu.Store(p.effectiveGPU(req.opts))
+					// A newly ready process starts a fresh idle window.
+					// Without this lastUse is zero on a first start, and
+					// stale after a restart, so the TTL compares against the
+					// Unix epoch and unloads the model on its first
+					// one-second tick — a load nobody ever got to use.
+					// Upstream mostlygeek/llama-swap#1095.
+					p.lastUse.Store(time.Now().UnixNano())
 					setState(StateReady)
 					notifyWaiters(nil)
 					if req.block {

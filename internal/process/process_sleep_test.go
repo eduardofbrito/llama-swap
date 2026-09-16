@@ -216,3 +216,40 @@ func TestProcessCommand_StopWhileSleeping(t *testing.T) {
 	}
 	t.Error("upstream still listening after Stop")
 }
+
+// TestProcessCommand_WakeResetsTheTTLBaseline covers the sleep-side half of the
+// TTL baseline bug upstream fixed for cold starts (mostlygeek/llama-swap#1095).
+//
+// The TTL deliberately keeps running while a model sleeps — sleeping holds the
+// weights in host RAM, and the TTL is what bounds that. But it measures from
+// lastUse, which a sleeping model has not refreshed since its last request. So
+// a model woken after a long nap would come back with nearly no idle window
+// left and could be stopped moments later, throwing away the wake it just paid
+// for. A wake is activity, and starts a fresh window.
+func TestProcessCommand_WakeResetsTheTTLBaseline(t *testing.T) {
+	p, _ := sleepTestProcess(t)
+
+	// Backdate the baseline to simulate a model that served a while ago and
+	// has been asleep since.
+	stale := time.Now().Add(-time.Hour)
+	p.lastUse.Store(stale.UnixNano())
+
+	if err := p.Sleep(testStopTimeout); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+	if got := p.State(); got != StateSleeping {
+		t.Fatalf("state after Sleep = %s, want %s", got, StateSleeping)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testStartTimeout)
+	defer cancel()
+	if err := p.EnsureReady(ctx, testStartTimeout); err != nil {
+		t.Fatalf("EnsureReady (wake): %v", err)
+	}
+
+	if got := time.Unix(0, p.lastUse.Load()); !got.After(stale) {
+		t.Errorf("lastUse after wake = %s, still the pre-sleep baseline (%s); "+
+			"a woken model must get a full TTL window, not the remains of the old one",
+			got, stale)
+	}
+}
