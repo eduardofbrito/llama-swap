@@ -465,6 +465,9 @@ func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
 // request wakes it instead of paying for a full start. Everything else is
 // stopped.
 //
+// loading is the model this swap is about to start, passed through so the
+// sleeper cap does not choose it as a victim.
+//
 // This is deliberately NOT used by StopProcesses: that path serves an explicit
 // unload, where the caller asked for the model to be gone and a process still
 // sitting on gigabytes of host RAM would not be that. Eviction to make room is
@@ -474,7 +477,7 @@ func (b *baseRouter) GrantServe(req scheduler.HandlerReq, modelID string) bool {
 // about to load another model onto the same device, so leaving the old one
 // holding its VRAM because sleeping did not work would turn a slow swap into a
 // failed one.
-func (b *baseRouter) evict(id string, p process.Process, timeout time.Duration) {
+func (b *baseRouter) evict(loading, id string, p process.Process, timeout time.Duration) {
 	if b.configAt().Models[id].SleepMode {
 		if sleeper, ok := p.(process.ProcessWithSleep); ok {
 			if err := sleeper.Sleep(timeout); err == nil {
@@ -485,7 +488,7 @@ func (b *baseRouter) evict(id string, p process.Process, timeout time.Duration) 
 				// so letting every one of them enforce the cap has them stop
 				// each other depending on which goroutine gets there first.
 				if newlyAsleep := b.noteSlept(id); newlyAsleep {
-					b.capSleepersOn(b.deviceOf(id), id, timeout)
+					b.capSleepersOn(b.deviceOf(id), id, loading, timeout)
 				}
 				return
 			} else {
@@ -547,7 +550,15 @@ func (b *baseRouter) noteAwake(id string) {
 // Longest-asleep is the right one to give up because it is also the
 // least-recently-used: a model served right up to the moment it was evicted,
 // so an older sleep means an older last use.
-func (b *baseRouter) capSleepersOn(device, evicting string, timeout time.Duration) {
+//
+// Two models are never victims. evicting is the one that just slept — it holds
+// a slot by definition, and counting it would have it stop itself. loading is
+// the model this swap is starting: it is very often the longest-asleep sleeper
+// on this very card (waking it is what freed the slot the evicted model just
+// took), and it is about to stop being a sleeper at all. Stopping it threw
+// away the wake the swap was in the middle of and cold-started the model
+// instead — 44 seconds where the log should have read "woke from sleep".
+func (b *baseRouter) capSleepersOn(device, evicting, loading string, timeout time.Duration) {
 	limit := b.configAt().Routing.Scheduler.Settings.Fifo.MaxSleepingPerGPU
 	if limit <= 0 || device == "" {
 		return
@@ -561,7 +572,7 @@ func (b *baseRouter) capSleepersOn(device, evicting string, timeout time.Duratio
 	var asleep []sleeper
 	b.sleptMu.Lock()
 	for id, when := range b.sleptAt {
-		if id != evicting && b.deviceOf(id) == device {
+		if id != evicting && id != loading && b.deviceOf(id) == device {
 			asleep = append(asleep, sleeper{id, when})
 		}
 	}
@@ -644,7 +655,7 @@ func (b *baseRouter) doSwap(modelID string, toStop []string, opts process.Option
 		wg.Add(1)
 		go func(p process.Process, id string) {
 			defer wg.Done()
-			b.evict(id, p, timeout)
+			b.evict(modelID, id, p, timeout)
 		}(b.processesAt()[mID], mID)
 	}
 	wg.Wait()

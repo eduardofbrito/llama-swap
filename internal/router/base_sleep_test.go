@@ -244,3 +244,47 @@ func TestBaseRouter_SleeperCapIsPerDevice(t *testing.T) {
 		t.Errorf("b state = %s, want %s; it is the only sleeper on device 0", got, process.StateSleeping)
 	}
 }
+
+// TestBaseRouter_SleeperCapSparesTheModelBeingWoken reproduces what production
+// did on the first swap back to a sleeping model:
+//
+//	<qwen3.6-35b-a3b> slept in 21.311s — GPU memory released, process kept alive
+//	group: device 0 is over the sleeper cap (1 max); stopping soberano-v1.1,
+//	       asleep the longest, to free its share of the card
+//	group: evicted [qwen3.6-35b-a3b] in 26.8s, now loading soberano-v1.1
+//	group: swapped to soberano-v1.1 in 1m11.098s (evictions 26.8s, load 44.297s)
+//
+// The cap stopped the very model the swap was waking. It is the natural victim
+// — waking it is what freed the card the newly evicted model just took, so it
+// is reliably the longest-asleep sleeper there — and it is also the one model
+// that is about to stop being a sleeper at all. Counting it made the swap
+// throw away a one-second wake and pay a 44-second cold start instead, every
+// single time the group came back around.
+func TestBaseRouter_SleeperCapSparesTheModelBeingWoken(t *testing.T) {
+	a, bProc := newFakeProcess("a"), newFakeProcess("b")
+	a.autoReady, bProc.autoReady = true, true
+	planner := &stubPlanner{evict: map[string][]string{"a": {"b"}, "b": {"a"}}}
+	r := newTestBaseWithConfig(t, capConfig(1, "0", "a", "b"),
+		map[string]process.Process{"a": a, "b": bProc}, planner)
+
+	serve(t, r, "a")
+	serve(t, r, "b") // a sleeps on device 0 — one sleeper, at the cap
+	if got := a.State(); got != process.StateSleeping {
+		t.Fatalf("a state = %s, want %s", got, process.StateSleeping)
+	}
+	stopsBefore := a.stopCalls.Load()
+
+	serve(t, r, "a") // b sleeps to make room; a must wake, not be stopped
+
+	if got := a.State(); got != process.StateReady {
+		t.Errorf("a state = %s, want %s", got, process.StateReady)
+	}
+	if got := a.stopCalls.Load(); got != stopsBefore {
+		t.Errorf("a was stopped %d more time(s) while being woken; the cap must "+
+			"never pick the model the swap is loading — that turns a wake into "+
+			"a cold start", got-stopsBefore)
+	}
+	if got := bProc.State(); got != process.StateSleeping {
+		t.Errorf("b state = %s, want %s; it is within the cap once a is awake", got, process.StateSleeping)
+	}
+}
