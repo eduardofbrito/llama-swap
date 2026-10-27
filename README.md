@@ -48,6 +48,7 @@ Features added in this fork on top of upstream `main`:
   It pins the fork commit through `LLAMA_SWAP_REF` so a build is reproducible, and stamps the binary's version from the checked-out tag (or its short SHA). The file's header documents the config keys worth enabling on a multi-GPU host.
 - ✅ **Config API** - machine-accessible endpoints, **off by default**:
   - `GET /api/gpus` - list the GPUs available for model loading (real device indexes) with each device's live used/total memory
+  - `GET /api/gpus/groups` - per-group device placement (`gpus:` groups): which member occupies each device
   - `GET /api/config/status` - whether config editing is available on this instance (the UI hides the `Conf` tab and **Add Model** when it is not)
   - `GET /api/config/model/{model_id}` - one model's block from the config file as YAML
   - `PUT /api/config/model/{model_id}` - replace one model's block (invalid YAML → 422, file untouched)
@@ -102,6 +103,7 @@ Features added in this fork on top of upstream `main`:
   - `GET /api/profiles` - list configured profiles and the active selection
   - `PUT /api/profiles/active` - activate a profile or select none
   - `GET /api/gpus` - list the GPUs available for model loading, with live memory per device (fork)
+  - `GET /api/gpus/groups` - per-group device placement for `gpus:` groups (fork)
   - `GET /api/config/status` - report whether config editing is enabled (fork)
   - `GET /api/config/model/:model_id` - read one model's block from the config file as YAML (fork)
   - `PUT /api/config/model/:model_id` - replace one model's block in the config file (fork)

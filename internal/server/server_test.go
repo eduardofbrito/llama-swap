@@ -35,6 +35,7 @@ type stubRouter struct {
 	unloadTimeout time.Duration
 	loggers       map[string]*logmon.Monitor
 	gpuFor        map[string]string
+	gpuGroups     []router.GPUGroup
 	refreshModels []string
 	refreshErr    error
 }
@@ -67,6 +68,7 @@ func (s *stubRouter) ProcessGPU(modelID string) string {
 	}
 	return ""
 }
+func (s *stubRouter) GPUAssignments() []router.GPUGroup { return s.gpuGroups }
 func (s *stubRouter) Unload(timeout time.Duration, models ...string) {
 	s.unloadCalls.Add(1)
 	s.unloadTimeout = timeout

@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { link } from "svelte-spa-router";
   import { Gpu as GpuIcon, ArrowUpToLine, ArrowDownToLine, TriangleAlert } from "@lucide/svelte";
-  import { gpus, models, unloadSingleModel, fetchGpus } from "../stores/api";
+  import { gpus, gpuGroups, models, unloadSingleModel, fetchGpus, fetchGpuGroups } from "../stores/api";
   import { formatGpuMemory, gpuMemoryPct } from "../lib/format";
   import { handleLoadModel, statusDotColor } from "../stores/modelLoad";
   import type { GpuInfo, Model } from "../lib/types";
@@ -74,10 +74,20 @@
   // rather than showing whatever was true when the SSE connection opened.
   const MEMORY_REFRESH_MS = 5000;
   onMount(() => {
-    const tick = () => void fetchGpus().catch(() => {});
+    const tick = () => {
+      void fetchGpus().catch(() => {});
+      void fetchGpuGroups().catch(() => {});
+    };
     tick();
     const timer = setInterval(tick, MEMORY_REFRESH_MS);
     return () => clearInterval(timer);
+  });
+
+  // Group placement changes when a model loads, unloads or sleeps, not on the
+  // memory timer, so refetch it whenever the model list updates.
+  $effect(() => {
+    void $models;
+    void fetchGpuGroups().catch(() => {});
   });
 
   // A GPU with no llama-swap model on it should be empty. Anything above this
@@ -143,6 +153,42 @@
       has memory held by a process llama-swap did not start.
     </p>
   </div>
+
+  {#if $gpuGroups.length > 0}
+    <section class="mb-6" aria-label="GPU groups">
+      <h4 class="mb-1 font-medium">Groups</h4>
+      <p class="mb-3 text-sm text-muted-foreground">
+        Groups that declare <code>gpus</code> place one member per device when it
+        starts. Each row is a device in the group and the member holding it.
+      </p>
+      <div class="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+        {#each $gpuGroups as group (group.group)}
+          <article class="rounded-md border p-4">
+            <div class="mb-2 flex items-center gap-2">
+              <h5 class="font-medium">{group.group}</h5>
+              <span class="ml-auto font-mono text-xs text-muted-foreground">{group.deviceEnv}</span>
+            </div>
+            <ul class="flex flex-col gap-1.5">
+              {#each group.devices as dev (dev.device)}
+                <li class="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                  <GpuIcon class="size-4 shrink-0 text-muted-foreground" />
+                  <span class="shrink-0 font-mono text-xs text-muted-foreground">GPU {dev.device}</span>
+                  {#if dev.model}
+                    <a href="/models/{encodeURIComponent(dev.model)}" use:link class="flex-1 truncate font-medium">
+                      {dev.model}
+                    </a>
+                    <span class="shrink-0 text-xs text-muted-foreground">{dev.state}</span>
+                  {:else}
+                    <span class="flex-1 text-muted-foreground">Free</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </article>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   {#if $gpus.length === 0}
     <div class="rounded-lg border p-6 text-sm text-muted-foreground">

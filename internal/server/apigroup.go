@@ -15,6 +15,7 @@ import (
 	"github.com/mostlygeek/llama-swap/internal/hw"
 	"github.com/mostlygeek/llama-swap/internal/perf"
 	"github.com/mostlygeek/llama-swap/internal/process"
+	"github.com/mostlygeek/llama-swap/internal/router"
 	"github.com/mostlygeek/llama-swap/internal/store"
 	"github.com/mostlygeek/llama-swap/internal/swaputil"
 )
@@ -481,6 +482,19 @@ func (s *Server) handleAPIGpus(w http.ResponseWriter, r *http.Request) {
 	gpus := gpuList(s.hardware, newestGPUSamples(s.perf))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(gpus)
+}
+
+// handleAPIGpuGroups reports, for every group that declares `gpus`, which
+// member currently occupies each of the group's devices. It is the data source
+// for the GPUs page's per-group placement view. Groups that do not declare
+// `gpus` are not listed; the endpoint returns an empty list when none does.
+func (s *Server) handleAPIGpuGroups(w http.ResponseWriter, r *http.Request) {
+	groups := s.local.GPUAssignments()
+	if groups == nil {
+		groups = []router.GPUGroup{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(groups)
 }
 
 // gpuList merges the hardware snapshot with the live memory readings into the

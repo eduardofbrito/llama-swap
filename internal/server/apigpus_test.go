@@ -11,6 +11,7 @@ import (
 
 	"github.com/mostlygeek/llama-swap/internal/hw"
 	"github.com/mostlygeek/llama-swap/internal/perf"
+	"github.com/mostlygeek/llama-swap/internal/router"
 )
 
 func gpuTestStrPtr(s string) *string { return &s }
@@ -30,15 +31,15 @@ func gpuTestSnapshot(accelerators ...hw.Accelerator) *hw.HardwareSnapshot {
 func TestServer_APIGpus_ListsSelectableGpus(t *testing.T) {
 	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
 	s.hardware = gpuTestSnapshot(
-		// display index 0, real device index 1 — must be offered
+		// display index 0, real device index 1 â€” must be offered
 		hw.Accelerator{Index: 0, DeviceIndex: gpuTestIntPtr(1), Kind: "gpu", Vendor: gpuTestStrPtr("NVIDIA"), Model: gpuTestStrPtr("RTX 4090")},
-		// unknown device index — must be skipped
+		// unknown device index â€” must be skipped
 		hw.Accelerator{Index: 1, Kind: "gpu", Vendor: gpuTestStrPtr("NVIDIA"), Model: gpuTestStrPtr("RTX 4090")},
-		// non-gpu kind — must be skipped
+		// non-gpu kind â€” must be skipped
 		hw.Accelerator{Index: 2, DeviceIndex: gpuTestIntPtr(0), Kind: "cpu", Vendor: gpuTestStrPtr("Intel"), Model: gpuTestStrPtr("Xeon")},
-		// integrated GPU without vendor/model info — must be skipped
+		// integrated GPU without vendor/model info â€” must be skipped
 		hw.Accelerator{Index: 3, DeviceIndex: gpuTestIntPtr(2), Kind: "gpu"},
-		// AMD discrete GPU, real device index 0 — must be offered, and sort first
+		// AMD discrete GPU, real device index 0 â€” must be offered, and sort first
 		hw.Accelerator{Index: 4, DeviceIndex: gpuTestIntPtr(0), Kind: "gpu", Vendor: gpuTestStrPtr("AMD"), Model: gpuTestStrPtr("Radeon RX 7900")},
 	)
 
@@ -141,8 +142,8 @@ func TestGpuList_MemoryKeyedByDeviceIndexNotDisplayIndex(t *testing.T) {
 		Vendor: gpuTestStrPtr("NVIDIA"), Model: gpuTestStrPtr("RTX 4090"),
 	})
 	memory := map[int]perf.GpuStat{
-		0: {ID: 0, MemUsedMB: 1, MemTotalMB: 2},         // display index — wrong
-		3: {ID: 3, MemUsedMB: 12000, MemTotalMB: 24000}, // device index — right
+		0: {ID: 0, MemUsedMB: 1, MemTotalMB: 2},         // display index â€” wrong
+		3: {ID: 3, MemUsedMB: 12000, MemTotalMB: 24000}, // device index â€” right
 	}
 
 	gpus := gpuList(hardware, memory)
@@ -193,5 +194,53 @@ func TestNewestPerGPU(t *testing.T) {
 	}
 	if n := len(newestPerGPU(nil)); n != 0 {
 		t.Errorf("newestPerGPU(nil) has %d entries, want 0", n)
+	}
+}
+
+// TestServer_APIGpuGroups_ReportsPlacement: /api/gpus/groups returns each
+// gpus-declaring group with the member occupying each device.
+func TestServer_APIGpuGroups_ReportsPlacement(t *testing.T) {
+	local := newStubRouter(nil, "")
+	local.gpuGroups = []router.GPUGroup{{
+		Group:     "g",
+		DeviceEnv: "CUDA_VISIBLE_DEVICES",
+		Devices: []router.GPUDevice{
+			{Device: "0", Model: "a", State: "ready"},
+			{Device: "1"},
+		},
+	}}
+	s := newTestServer(local, newStubRouter(nil, ""))
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/gpus/groups", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var got []router.GPUGroup
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v, body = %s", err, w.Body.String())
+	}
+	if len(got) != 1 || got[0].Group != "g" || len(got[0].Devices) != 2 {
+		t.Fatalf("groups = %+v", got)
+	}
+	if got[0].Devices[0].Model != "a" || got[0].Devices[1].Model != "" {
+		t.Errorf("devices = %+v; want a on 0 and 1 free", got[0].Devices)
+	}
+}
+
+// TestServer_APIGpuGroups_EmptyWhenNoGroups: with no gpus-declaring group the
+// endpoint returns an empty (non-nil) list so the UI can hide the section.
+func TestServer_APIGpuGroups_EmptyWhenNoGroups(t *testing.T) {
+	s := newTestServer(newStubRouter(nil, ""), newStubRouter(nil, ""))
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/gpus/groups", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
+		t.Errorf("body = %q, want []", got)
 	}
 }

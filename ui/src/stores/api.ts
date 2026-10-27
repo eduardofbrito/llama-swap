@@ -16,6 +16,7 @@ import type {
   PlaygroundModelType,
   HardwareSnapshot,
   GpuInfo,
+  GpuGroup,
   TailcatStatus,
 } from "../lib/types";
 import { appendActivityFilters, type ActivityFilters } from "../lib/activityFilters";
@@ -64,6 +65,9 @@ export const versionInfo = writable<VersionInfo>({
 // connected; empty means the host reports no selectable GPU, so the UI hides
 // the per-model GPU selector and the configured default always applies.
 export const gpus = writable<GpuInfo[]>([]);
+// Per-group GPU placement from /api/gpus/groups: for each group that declares
+// `gpus`, which member occupies each device. Empty when no group does.
+export const gpuGroups = writable<GpuGroup[]>([]);
 // Whether this instance allows editing the config file from the UI. It is off
 // unless the operator started llama-swap with -enable-config-api and configured
 // apiKeys, so the Conf tab and the Add Model dialog stay hidden by default
@@ -544,6 +548,17 @@ export async function fetchGpus(): Promise<GpuInfo[]> {
   const data = (await response.json()) as GpuInfo[];
   const list = Array.isArray(data) ? data : [];
   gpus.set(list);
+  return list;
+}
+
+export async function fetchGpuGroups(): Promise<GpuGroup[]> {
+  const response = await fetch("/api/gpus/groups");
+  if (!response.ok) {
+    throw new Error(`Failed to list GPU groups: ${response.status}`);
+  }
+  const data = (await response.json()) as GpuGroup[];
+  const list = Array.isArray(data) ? data : [];
+  gpuGroups.set(list);
   return list;
 }
 

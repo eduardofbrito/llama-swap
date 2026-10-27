@@ -47,6 +47,10 @@ type LocalRouter interface {
 	// this router, is not running, or its GPU could not be determined.
 	ProcessGPU(modelID string) string
 
+	// GPUAssignments reports, per group that declares `gpus`, which model
+	// occupies each of the group's devices. Nil when no group manages devices.
+	GPUAssignments() []GPUGroup
+
 	// Unload stops the named models, or every running model when none are
 	// named. It blocks until each targeted process has stopped. A timeout <= 0
 	// gives each process its configured unloadTimeout to stop gracefully:

@@ -520,6 +520,7 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/version", apiChain.ThenFunc(s.handleAPIVersion))
 	mux.Handle("GET /api/hardware", apiChain.ThenFunc(s.handleAPIHardware))
 	mux.Handle("GET /api/gpus", apiChain.ThenFunc(s.handleAPIGpus))
+	mux.Handle("GET /api/gpus/groups", apiChain.ThenFunc(s.handleAPIGpuGroups))
 	mux.Handle("GET /api/tailcat", apiChain.ThenFunc(s.handleAPITailcat))
 	mux.Handle("GET /api/captures/{id}", apiChain.ThenFunc(s.handleAPICapture))
 	mux.Handle("GET /api/config/status", apiChain.ThenFunc(s.handleAPIConfigStatus))

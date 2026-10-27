@@ -280,3 +280,59 @@ func TestBaseRouter_SleepingModelIgnoresAGpuOverride(t *testing.T) {
 		t.Errorf("GpuOverride = %q, want %q (where it is asleep)", got, placed)
 	}
 }
+
+// TestDeviceAssigner_Assignments: the per-group view joins each declared device
+// with the member live process state says holds it, and shows free devices
+// (including one whose member stopped) with no model.
+func TestDeviceAssigner_Assignments(t *testing.T) {
+	d := newDeviceAssigner(gpuGroupConfig([]string{"0", "1", "2"}, []string{"a", "b", "c"}, "HIP_VISIBLE_DEVICES"))
+	if d == nil {
+		t.Fatal("assigner is nil; a group declaring gpus must produce one")
+	}
+
+	// a on 0 (ready), b on 1 (sleeping), c is stopped and so holds nothing.
+	live := staticDevices(map[string]string{"a": "0", "b": "1"})
+	running := map[string]process.ProcessState{"a": process.StateReady, "b": process.StateSleeping}
+
+	got := d.assignments(live, running)
+	if len(got) != 1 || got[0].Group != "g" || got[0].DeviceEnv != "HIP_VISIBLE_DEVICES" {
+		t.Fatalf("assignments = %+v; want one group g with HIP_VISIBLE_DEVICES", got)
+	}
+	want := []GPUDevice{
+		{Device: "0", Model: "a", State: string(process.StateReady)},
+		{Device: "1", Model: "b", State: string(process.StateSleeping)},
+		{Device: "2"},
+	}
+	if len(got[0].Devices) != len(want) {
+		t.Fatalf("devices = %+v; want %+v", got[0].Devices, want)
+	}
+	for i := range want {
+		if got[0].Devices[i] != want[i] {
+			t.Errorf("device[%d] = %+v; want %+v", i, got[0].Devices[i], want[i])
+		}
+	}
+}
+
+// TestDeviceAssigner_AssignmentsMultiDeviceModel: a model that holds several
+// devices ("0,1") is reported on each of them.
+func TestDeviceAssigner_AssignmentsMultiDeviceModel(t *testing.T) {
+	d := newDeviceAssigner(gpuGroupConfig([]string{"0", "1"}, []string{"big"}, ""))
+	got := d.assignments(
+		staticDevices(map[string]string{"big": "0,1"}),
+		map[string]process.ProcessState{"big": process.StateReady},
+	)
+	for i, dev := range got[0].Devices {
+		if dev.Model != "big" {
+			t.Errorf("device[%d].Model = %q; want big", i, dev.Model)
+		}
+	}
+}
+
+// TestDeviceAssigner_AssignmentsNil: no group declares devices, so there is
+// nothing to report and a nil assigner must be safe to ask.
+func TestDeviceAssigner_AssignmentsNil(t *testing.T) {
+	var d *deviceAssigner
+	if got := d.assignments(staticDevices(nil), nil); got != nil {
+		t.Errorf("assignments on nil assigner = %+v; want nil", got)
+	}
+}

@@ -59,6 +59,21 @@ export interface GpuInfo {
   totalMB?: number;
 }
 
+// One device of a group's `gpus` list and the model occupying it. model and
+// state are empty when the device is free.
+export interface GpuGroupDevice {
+  device: string;
+  model: string;
+  state: string;
+}
+
+// A group that declares `gpus`, with where its members sit across them now.
+export interface GpuGroup {
+  group: string;
+  deviceEnv: string;
+  devices: GpuGroupDevice[];
+}
+
 export interface TokenMetrics {
   cache_tokens: number;
   draft_tokens: number;

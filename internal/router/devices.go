@@ -1,6 +1,7 @@
 package router
 
 import (
+	"sort"
 	"strings"
 	"sync"
 
@@ -217,6 +218,71 @@ func containsDevice(devices []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// GPUDevice is one device of a group's `gpus` list joined with the model that
+// currently occupies it. Model and State are empty when the device is free.
+type GPUDevice struct {
+	Device string `json:"device"`
+	Model  string `json:"model"`
+	State  string `json:"state"`
+}
+
+// GPUGroup is a group that declares `gpus` and where its members sit across
+// those devices right now.
+type GPUGroup struct {
+	Group     string      `json:"group"`
+	DeviceEnv string      `json:"deviceEnv"`
+	Devices   []GPUDevice `json:"devices"`
+}
+
+// assignments reports, per group that declares `gpus`, which member currently
+// occupies each device. It is a pure read of live process state: deviceOf
+// names the device(s) a running model holds ("" when it is not running) and
+// running carries each model's state. Nothing is recorded, so a member that
+// exited on its own simply shows its device as free.
+func (d *deviceAssigner) assignments(deviceOf func(string) string, running map[string]process.ProcessState) []GPUGroup {
+	if d == nil {
+		return nil
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	groupIDs := make([]string, 0, len(d.groupDevices))
+	for groupID := range d.groupDevices {
+		groupIDs = append(groupIDs, groupID)
+	}
+	sort.Strings(groupIDs)
+
+	out := make([]GPUGroup, 0, len(groupIDs))
+	for _, groupID := range groupIDs {
+		devices := make([]GPUDevice, 0, len(d.groupDevices[groupID]))
+		for _, device := range d.groupDevices[groupID] {
+			entry := GPUDevice{Device: device}
+			for _, member := range d.groupMembers[groupID] {
+				if !containsDevice(splitDevices(deviceOf(member)), device) {
+					continue
+				}
+				entry.Model = member
+				entry.State = string(running[member])
+				break
+			}
+			devices = append(devices, entry)
+		}
+		out = append(out, GPUGroup{
+			Group:     groupID,
+			DeviceEnv: d.groupDeviceEnv[groupID],
+			Devices:   devices,
+		})
+	}
+	return out
+}
+
+// GPUAssignments reports, per group that declares `gpus`, which model occupies
+// each of the group's devices. It returns nil when no group manages devices.
+// Safe to call off the run loop: it only reads live process state.
+func (b *baseRouter) GPUAssignments() []GPUGroup {
+	return b.devices.assignments(b.processDeviceFunc(), b.RunningModels())
 }
 
 // processDeviceFunc returns a lookup for the device a running model occupies,
